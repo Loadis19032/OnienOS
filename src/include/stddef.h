@@ -46,4 +46,9 @@ typedef __WCHAR_TYPE__ wchar_t;
 #define ARRAY_SIZE(a) (sizeof(a) / sizeof((a)[0]))
 #endif
 
+#ifndef _SSIZE_T_DEFINED
+typedef ptrdiff_t ssize_t;
+#define _SSIZE_T_DEFINED
+#endif
+
 #endif /* _STDDEF_H */

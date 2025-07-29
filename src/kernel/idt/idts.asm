@@ -5,26 +5,23 @@ extern irq_handler
 %macro ISR_NOERRCODE 1
 global isr%1
 isr%1:
-    cli
-    push qword 0       
-    push qword %1      
+    push qword 0        ; Push dummy error code
+    push qword %1      ; Push interrupt number
     jmp isr_common_stub
 %endmacro
 
 %macro ISR_ERRCODE 1
 global isr%1
 isr%1:
-    cli
-    push qword %1       
+    push qword %1       ; Interrupt number already pushed (error code is on stack)
     jmp isr_common_stub
 %endmacro
 
 %macro IRQ 2
 global irq%1
 irq%1:
-    cli
-    push qword 0        
-    push qword %2       
+    push qword 0        ; Push dummy error code
+    push qword %2       ; Push interrupt number
     jmp irq_common_stub
 %endmacro
 
@@ -114,7 +111,7 @@ isr_common_stub:
     pop rbx
     pop rax
     
-    add rsp, 16      
+    add rsp, 16
     iretq          
 
 irq_common_stub:
@@ -153,5 +150,5 @@ irq_common_stub:
     pop rbx
     pop rax
     
-    add rsp, 16        
-    iretq     
+    add rsp, 16
+    iretq

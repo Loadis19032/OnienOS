@@ -1,6 +1,6 @@
 #include "math.h"
 
-static double factorial(int n) {
+double factorial(int n) {
     double result = 1.0;
     for (int i = 2; i <= n; i++) {
         result *= i;
@@ -20,6 +20,16 @@ double sin(double x) {
     return result;
 }
 
+float sinf(float x) {
+    while (x > 3.14159265f * 2) x -= 3.14159265f * 2;
+    while (x < -3.14159265f * 2) x += 3.14159265f * 2;
+    
+    float xx = x * x;
+    float result = x - x * xx / 6.0f;
+    result += x * xx * xx / 120.0f;
+    return result;
+}
+
 double cos(double x) {
     while (x > M_PI) x -= 2 * M_PI;
     while (x < -M_PI) x += 2 * M_PI;
@@ -29,6 +39,17 @@ double cos(double x) {
         double term = pow(-1, n) * pow(x, 2 * n) / factorial(2 * n);
         result += term;
     }
+    return result;
+}
+
+float cosf(float x) {
+    while (x > 3.14159265f * 2) x -= 3.14159265f * 2;
+    while (x < -3.14159265f * 2) x += 3.14159265f * 2;
+    
+    float xx = x * x;
+    float result = 1.0f - xx/2.0f;
+    result += xx * xx / 24.0f;
+    result -= xx * xx * xx / 720.0f;
     return result;
 }
 
@@ -85,6 +106,23 @@ double log(double x) {
     return result;
 }
 
+double log10(double x) {
+    double ln10 = 2.302585092994046;
+    double y = 0.0;
+    double term = (x - 1.0) / (x + 1.0);
+    double term_sq = term * term;
+    double pow_term = term;
+    double denom = 1.0;
+    
+    for (int i = 0; i < 10; i++) {
+        y += pow_term / denom;
+        pow_term *= term_sq;
+        denom += 2.0;
+    }
+    
+    return 2.0 * y / ln10;
+}
+
 double ceil(double x) {
     int int_part = (int)x;
     if (x > 0 && x != int_part) {
@@ -107,6 +145,10 @@ double round(double x) {
     } else {
         return (int)(x - 0.5);
     }
+}
+
+int abs(int x) {
+    return (x < 0) ? -x : x;
 }
 
 double fabs(double x) {

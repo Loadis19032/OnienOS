@@ -13,6 +13,10 @@ int isspace(int c) {
             c == '\r' || c == '\v' || c == '\f');
 }
 
+int isupper(int c) {
+    return ((unsigned)c - 'A') <= ('Z' - 'A');
+}
+
 int tolower(int c) {
     if (c >= 'A' && c <= 'Z') {
         return c + ('a' - 'A');
@@ -25,4 +29,16 @@ int toupper(int c) {
         return c - ('a' - 'A');
     }
     return c;
+}
+
+int isnan(double x) {
+    uint64_t bits;
+    memcpy(&bits, &x, sizeof(double));
+    return ((bits >> 52) & 0x7FF) == 0x7FF && (bits & 0xFFFFFFFFFFFFF) != 0;
+}
+
+int isinf(double x) {
+    uint64_t bits;
+    memcpy(&bits, &x, sizeof(double));
+    return ((bits >> 52) & 0x7FF) == 0x7FF && (bits & 0xFFFFFFFFFFFFF) == 0;
 }

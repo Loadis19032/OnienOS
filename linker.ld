@@ -5,9 +5,9 @@ KERNEL_BASE = 0x00100000;
 SECTIONS {
     . = KERNEL_BASE;
 
-    .multiboot : {
-        *(.multiboot_header)
-    }
+    #.multiboot : {
+    #    *(.multiboot_header)
+    #}
 
     .text ALIGN(4K) : {
         *(.text)

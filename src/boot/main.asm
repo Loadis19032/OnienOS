@@ -1,32 +1,41 @@
-MAGIC equ 0xE85250D6    
-ARCHITECTURE equ 0      
-HEADER_LENGTH equ header_end - header_start
-CHECKSUM equ -(MAGIC + ARCHITECTURE + HEADER_LENGTH)
-
 PAGE_SIZE equ 4096
 PAGE_PRESENT equ 1
 PAGE_WRITABLE equ 2
 PAGE_HUGE equ 0x80
 
 section .multiboot_header
-align 8
 header_start:
-    dd MAGIC             
-    dd ARCHITECTURE      
-    dd HEADER_LENGTH     
-    dd CHECKSUM          
+    dd 0xe85250d6                
+    dd 0                         
+    dd header_end - header_start 
 
-    dw 0        
-    dw 0        
-    dd 8        
+    dd 0x100000000 - (0xe85250d6 + 0 + (header_end - header_start))
+
+    ;align 8
+    ;framebuffer_tag_start:
+    ;dw 5                        
+    ;dw 1                        
+    ;dd framebuffer_tag_end - framebuffer_tag_start
+    ;dd 1024                     
+    ;dd 768                      
+    ;dd 32                       
+    ;framebuffer_tag_end:
+
+    align 8
+    dw 0            
+    dw 0            
+    dd 8            
 header_end:
 
 section .bss
 align 4096
+global pml4_table
 pml4_table:
     resb PAGE_SIZE
+global pdp_table
 pdp_table:
     resb PAGE_SIZE
+global pd_table
 pd_table:
     resb PAGE_SIZE
 
@@ -142,7 +151,7 @@ setup_page_tables:
     
     mov edi, pd_table
     mov eax, PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE
-    mov ecx, 512             
+    mov ecx, 32 ;32
 .setup_pd_loop:
     mov [edi], eax
     add eax, 0x200000           
@@ -152,22 +161,28 @@ setup_page_tables:
     ret
 
 enable_paging:
+    ; 1. Загружаем CR3
     mov eax, pml4_table
     mov cr3, eax
-    
+
+    ; 2. Включаем PAE (бит 5 в CR4)
     mov eax, cr4
-    or eax, 1 << 5     
+    or eax, (1 << 5)
     mov cr4, eax
-    
-    mov ecx, 0xC0000080      
+
+    ; 3. Включаем long mode (EFER.LME)
+    mov ecx, 0xC0000080
     rdmsr
-    or eax, 1 << 8      
+    or eax, (1 << 8)
     wrmsr
-    
+
+    ; 4. Включаем пейджинг и защищённый режим
     mov eax, cr0
-    or eax, 1 << 31 
+    or eax, (1 << 31) | (1 << 0)  ; PG | PE
     mov cr0, eax
     
+    ; 5. Сбрасываем кеш
+    wbinvd
     ret
 
 print_string:
@@ -189,7 +204,18 @@ print_string:
 
 bits 64
 extern kmain
-long_mode_start:
+long_mode_start:    
+    mov rax, cr0
+    and ax, ~(1 << 2)
+    or ax, (1 << 1)  
+    or ax, (1 << 5)  
+    mov cr0, rax
+
+    mov rax, cr4
+    or ax, (1 << 9)
+    or ax, (1 << 10)
+    mov cr4, rax
+    
     mov ax, gdt64.data
     mov ds, ax
     mov es, ax
@@ -201,6 +227,8 @@ long_mode_start:
     
     cld
     
+
+
     call kmain
     
     cli
@@ -210,3 +238,5 @@ long_mode_start:
 
 section .rodata
 success_message db 'Long mode kernel running successfully!', 0
+
+global pml4_table

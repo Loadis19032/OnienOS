@@ -28,6 +28,7 @@ int putchar(int c);
 void clear();
 int printf(const char* fmt, ...);
 
+void setcursor(uint8_t x, uint8_t y);
 void setcolor(int color);
 
 #endif // STDIO_H
