@@ -11,15 +11,13 @@ header_start:
 
     dd 0x100000000 - (0xe85250d6 + 0 + (header_end - header_start))
 
-    ;align 8
-    ;framebuffer_tag_start:
-    ;dw 5                        
-    ;dw 1                        
-    ;dd framebuffer_tag_end - framebuffer_tag_start
-    ;dd 1024                     
-    ;dd 768                      
-    ;dd 32                       
-    ;framebuffer_tag_end:
+    align 8
+    dw 5       
+    dw 1       
+    dd 20      
+    dd 1024
+    dd 768
+    dd 32           
 
     align 8
     dw 0            
@@ -58,6 +56,9 @@ error_cpuid_msg db 'ERROR: CPUID not supported', 0
 error_long_mode_msg db 'ERROR: Long mode not supported', 0
 error_success_msg db 'Successfully entered long mode!', 0
 
+global pml4_table_phys
+pml4_table_phys: dq 0
+
 section .text
 bits 32
 global _start
@@ -77,6 +78,11 @@ _start:
     jz .long_mode_error
 
     call setup_page_tables
+
+    mov eax, pml4_table
+    mov [pml4_table_phys], eax
+    mov dword [pml4_table_phys+4], 0
+
     call enable_paging
 
     lgdt [gdt64.pointer]
@@ -151,7 +157,7 @@ setup_page_tables:
     
     mov edi, pd_table
     mov eax, PAGE_PRESENT | PAGE_WRITABLE | PAGE_HUGE
-    mov ecx, 32 ;32
+    mov ecx, 16 ;32
 .setup_pd_loop:
     mov [edi], eax
     add eax, 0x200000           
@@ -180,7 +186,7 @@ enable_paging:
     mov eax, cr0
     or eax, (1 << 31) | (1 << 0)  ; PG | PE
     mov cr0, eax
-    
+
     ; 5. Сбрасываем кеш
     wbinvd
     ret

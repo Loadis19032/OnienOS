@@ -1,5 +1,7 @@
 #include "string.h"
 #include <stddef.h>
+#include <ctype.h>
+#include <stdlib.h>
 
 static int is_delim(char c, const char* delim) {
     while (*delim) {
@@ -197,6 +199,28 @@ char* strtok(char* str, const char* delim) {
     return token;
 }
 
+char *strtok_r(char *str, const char *delim, char **saveptr) {
+    if (!str && !(str = *saveptr)) {
+        return NULL;
+    }
+
+    str += strspn(str, delim);
+    if (*str == '\0') {
+        *saveptr = NULL;
+        return NULL;
+    }
+
+    char *end = str + strcspn(str, delim);
+    if (*end == '\0') {
+        *saveptr = NULL;
+        return str;
+    }
+
+    *end = '\0';
+    *saveptr = end + 1;
+    return str;
+}
+
 void* memset(void* s, int c, size_t n) {
     unsigned char* p = s;
     while (n--) *p++ = (unsigned char)c;
@@ -207,6 +231,32 @@ size_t strlen(const char* s) {
     size_t len = 0;
     while (*s++) len++;
     return len;
+}
+
+char* strdup(const char* s) {
+    if (s == NULL)
+        return NULL;
+    
+    size_t len = strlen(s) + 1;
+    char* dup = malloc(len);
+    
+    if (dup != NULL)
+        memcpy(dup, s, len);
+    
+    return dup;
+}
+
+int strcasecmp(const char *s1, const char *s2) {
+    while (*s1 && *s2) {
+        int diff = tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
+        if (diff != 0) {
+            return diff;
+        }
+        s1++;
+        s2++;
+    }
+    
+    return tolower((unsigned char)*s1) - tolower((unsigned char)*s2);
 }
 
 static const char* error_messages[] = {

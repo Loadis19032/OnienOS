@@ -154,3 +154,158 @@ int abs(int x) {
 double fabs(double x) {
     return x < 0 ? -x : x;
 }
+
+double fmod(double x, double y) {
+    union {
+        double f;
+        uint64_t i;
+    } ux = {x}, uy = {y};
+    
+    int ex = (ux.i >> 52) & 0x7FF;
+    int ey = (uy.i >> 52) & 0x7FF;
+    
+    if (y == 0.0 || isnan(y) || isinf(x) || ey == 0x7FF) {
+        return NAN;
+    }
+    
+    if (x == 0.0 || ex == 0x7FF) {
+        return x;
+    }
+    
+    int sign = ux.i >> 63;
+    ux.i &= 0x7FFFFFFFFFFFFFFF;
+    uy.i &= 0x7FFFFFFFFFFFFFFF;
+    
+    if (ux.i < uy.i) {
+        return x;
+    }
+    
+    if (ex == 0) {
+        ux.f = frexp(ux.f, &ex);
+        ex += 1;
+    }
+    
+    if (ey == 0) {
+        uy.f = frexp(uy.f, &ey);
+        ey += 1;
+    }
+    
+    while (ex > ey) {
+        uint64_t mx = ux.i & 0x000FFFFFFFFFFFFF;
+        uint64_t my = uy.i & 0x000FFFFFFFFFFFFF;
+        
+        mx |= 0x0010000000000000;
+        my |= 0x0010000000000000;
+        
+        if (ex - ey > 63) {
+            mx = 0;
+        } else {
+            mx >>= (ex - ey);
+        }
+        
+        uint64_t diff = (mx << (ex - ey)) - my;
+        
+        if (diff == 0) {
+            return copysign(0.0, x);
+        }
+        
+        int shift = __builtin_clzll(diff) - 11;
+        diff <<= shift;
+        ex -= shift;
+        
+        ux.i = ((uint64_t)(ex) << 52) | (diff & 0x000FFFFFFFFFFFFF);
+    }
+    
+    if (ux.i >= uy.i) {
+        ux.i -= uy.i;
+    }
+    
+    ux.i |= (uint64_t)sign << 63;
+    
+    return ux.f;
+}
+
+double frexp(double x, int *exp) {
+    union {
+        double f;
+        uint64_t i;
+    } u = {x};
+    
+    int e = (u.i >> 52) & 0x7FF;
+
+    if (e == 0) {
+        if (x == 0.0) {
+            *exp = 0;
+            return 0.0;
+        }
+        // Денормализованные числа
+        double subnormal = x * 0x1p54;
+        u.f = subnormal;
+        e = ((u.i >> 52) & 0x7FF) - 54;
+        *exp = e;
+        u.i = (u.i & 0x800FFFFFFFFFFFFFULL) | (0x3FEULL << 52);
+        return u.f;
+    }
+
+    if (e == 0x7FF) {
+        *exp = 0;
+        return x;
+    }
+
+    *exp = e - 0x3FE;
+    u.i = (u.i & 0x800FFFFFFFFFFFFFULL) | (0x3FEULL << 52);
+    return u.f;
+}
+
+double copysign(double x, double y) {
+    union {
+        double f;
+        uint64_t i;
+    } ux = {x}, uy = {y};
+
+    ux.i = (ux.i & 0x7FFFFFFFFFFFFFFFULL) | (uy.i & 0x8000000000000000ULL);
+    return ux.f;
+}
+
+double atan(double x) {
+    if (x > 1.0) {
+        return M_PI / 2 - atan(1.0 / x);
+    } else if (x < -1.0) {
+        return -M_PI / 2 - atan(1.0 / x);
+    }
+
+    double result = 0.0;
+    double term = x;
+    double x_squared = x * x;
+    int n = 1;
+
+    while (n < 100) {
+        result += term / n;
+        term *= -x_squared;
+        n += 2;
+        
+        if (term == 0.0) break;
+    }
+
+    return result;
+}
+
+double atan2(double y, double x) {
+    if (x > 0.0) {
+        return atan(y / x);
+    } else if (x < 0.0) {
+        if (y >= 0.0) {
+            return atan(y / x) + M_PI;
+        } else {
+            return atan(y / x) - M_PI;
+        }
+    } else {
+        if (y > 0.0) {
+            return M_PI;
+        } else if (y < 0.0) {
+            return -M_PI;
+        } else {
+            return 0.0;
+        }
+    }
+}

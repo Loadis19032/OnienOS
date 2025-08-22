@@ -1,79 +1,176 @@
 #ifndef MEM_H
 #define MEM_H
 
-#include <stdint.h>
 #include <stddef.h>
+#include <stdint.h>
+#include <stdbool.h>
 
-// Константы для управления памятью
-#define PAGE_SIZE 4096
-#define HUGE_PAGE_SIZE (2 * 1024 * 1024)  // 2MB huge pages
-#define HEAP_START 0x200000               // Начало кучи после 2MB
-#define MIN_BLOCK_SIZE 16                 // Минимальный размер блока
-#define MAGIC_ALLOC 0xDEADBEEF           // Магическое число для проверки
-#define MAGIC_FREE 0xFEEDFACE            // Магическое число для свободных блоков
+#define PAGE_SHIFT      12
+#define PAGE_SIZE       (1 << PAGE_SHIFT)
+#define PAGE_MASK       (~(PAGE_SIZE-1))
 
-// Флаги для страниц
-#define PAGE_PRESENT 0x001
-#define PAGE_WRITABLE 0x002
-#define PAGE_USER 0x004
-#define PAGE_WRITE_THROUGH 0x008
-#define PAGE_CACHE_DISABLE 0x010
-#define PAGE_ACCESSED 0x020
-#define PAGE_DIRTY 0x040
-#define PAGE_HUGE 0x080
-#define PAGE_GLOBAL 0x100
-#define PAGE_NO_EXECUTE 0x8000000000000000ULL
+#define PML4_SHIFT      39
+#define PDP_SHIFT       30
+#define PD_SHIFT        21
+#define PT_SHIFT        12
 
-// Макросы для работы с адресами страниц
-#define PML4_INDEX(addr) (((addr) >> 39) & 0x1FF)
-#define PDP_INDEX(addr) (((addr) >> 30) & 0x1FF)
-#define PD_INDEX(addr) (((addr) >> 21) & 0x1FF)
-#define PT_INDEX(addr) (((addr) >> 12) & 0x1FF)
-#define PAGE_ALIGN_DOWN(addr) ((uintptr_t)(addr) & ~(PAGE_SIZE - 1))
-#define PAGE_ALIGN_UP(addr) (((uintptr_t)(addr) + PAGE_SIZE - 1) & ~(PAGE_SIZE - 1))
+#define PML4_INDEX(v)   (((v) >> PML4_SHIFT) & 0x1FF)
+#define PDP_INDEX(v)    (((v) >> PDP_SHIFT) & 0x1FF)
+#define PD_INDEX(v)     (((v) >> PD_SHIFT) & 0x1FF)
+#define PT_INDEX(v)     (((v) >> PT_SHIFT) & 0x1FF)
 
-// Структура заголовка блока памяти
-typedef struct mem_block {
-    uint32_t magic;           // Магическое число для проверки целостности
-    size_t size;              // Размер блока (без заголовка)
-    struct mem_block* next;   // Следующий блок в списке
-    struct mem_block* prev;   // Предыдущий блок в списке
-    uint8_t is_free;          // 1 если блок свободен, 0 если занят
-    uint8_t padding[3];       // Выравнивание до 8 байт
-} __attribute__((packed)) mem_block_t;
+#define PAGE_PRESENT    (1 << 0)
+#define PAGE_WRITABLE   (1 << 1)
+#define PAGE_USER       (1 << 2)
+#define PAGE_PWT        (1 << 3)
+#define PAGE_PCD        (1 << 4)
+#define PAGE_ACCESSED   (1 << 5)
+#define PAGE_DIRTY      (1 << 6)
+#define PAGE_HUGE       (1 << 7)
+#define PAGE_GLOBAL     (1 << 8)
 
-// Статистика использования памяти
-typedef struct mem_stats {
-    size_t total_ram;         // Общий объем RAM
-    size_t used_ram;          // Используемая память
-    size_t free_ram;          // Свободная память
-    size_t heap_size;         // Размер кучи
-    size_t allocated_blocks;  // Количество выделенных блоков
-    size_t free_blocks;       // Количество свободных блоков
-} mem_stats_t;
+#define MAX_ORDER       10
+#define BUDDY_MAX_SIZE  (PAGE_SIZE << MAX_ORDER)
 
-// Основные функции управления памятью
-void mem_init(size_t total_ram, void* heap_start_addr);
-void* kmalloc(size_t size);
-void kfree(void* ptr);
-size_t getusedram(void);
+#define SLAB_MIN_SIZE   16
+#define SLAB_MAX_SIZE   PAGE_SIZE
 
-// Дополнительные функции для отладки и статистики
-void* kcalloc(size_t count, size_t size);
-void* krealloc(void* ptr, size_t new_size);
-mem_stats_t get_mem_stats(void);
-void print_mem_info(void);
-int mem_check_integrity(void);
+#define KMALLOC_MIN_SIZE SLAB_MIN_SIZE
+#define KMALLOC_MAX_SIZE (PAGE_SIZE << 3)
 
-// Функции для работы с виртуальной памятью и маппингом
-int map_page(uint64_t virtual_addr, uint64_t physical_addr, uint32_t flags);
-int unmap_page(uint64_t virtual_addr);
-uint64_t get_physical_addr(uint64_t virtual_addr);
-void* map_physical_memory(uint64_t physical_addr, size_t size, uint32_t flags);
-void unmap_physical_memory(void* virtual_addr, size_t size);
+#define ALIGN(x, a)     __ALIGN_MASK(x, (typeof(x))(a)-1)
+#define __ALIGN_MASK(x, mask) (((x) + (mask)) & ~(mask))
+#define ALIGN_UP(x, a)  ALIGN((x), (a))
+#define ALIGN_DOWN(x, a) ((x) & ~((typeof(x))(a)-1))
 
-// Внутренние функции (не для внешнего использования)
-void merge_free_blocks(mem_block_t* block);
-uint64_t get_pml4_table(void);
+#define container_of(ptr, type, member) ({ \
+    const typeof(((type *)0)->member) *__mptr = (ptr); \
+    (type *)((char *)__mptr - offsetof(type, member)); })
 
-#endif // MEM_H
+#define list_for_each(pos, head) \
+    for (pos = (head)->next; pos != (head); pos = pos->next)
+
+#define list_for_each_entry(pos, head, member) \
+    for (pos = container_of((head)->next, typeof(*pos), member); \
+         &pos->member != (head); \
+         pos = container_of(pos->member.next, typeof(*pos), member))
+
+#define list_for_each_entry_safe(pos, n, head, member) \
+    for (pos = container_of((head)->next, typeof(*pos), member), \
+         n = container_of(pos->member.next, typeof(*pos), member); \
+         &pos->member != (head); \
+         pos = n, n = container_of(n->member.next, typeof(*n), member))
+
+typedef struct list_head {
+    struct list_head *next, *prev;
+} list_head_t;
+
+typedef struct page {
+    list_head_t list;
+    unsigned int order;
+    unsigned int refcount;
+    unsigned long flags;
+} page_t;
+
+typedef struct {
+    list_head_t free_area[MAX_ORDER+1];
+    unsigned long nr_free;
+    uintptr_t base;
+    size_t size;
+} buddy_t;
+
+// Предварительное объявление структуры kmem_cache
+typedef struct kmem_cache kmem_cache_t;
+
+typedef struct slab {
+    list_head_t list;
+    void *freelist;
+    unsigned int inuse;
+    unsigned int free;
+    kmem_cache_t *cache;
+} slab_t;
+
+struct kmem_cache {
+    char name[32];
+    list_head_t slabs_full;
+    list_head_t slabs_partial;
+    list_head_t slabs_free;
+    size_t obj_size;
+    unsigned int objs_per_slab;
+    unsigned int order;
+    unsigned int objects;
+    unsigned int pages;
+};
+
+typedef struct {
+    buddy_t buddy;
+    kmem_cache_t kmalloc_caches[8];
+    uintptr_t phys_offset;
+    bool initialized;
+} mm_struct;
+
+void mm_init(uintptr_t mem_start, uintptr_t mem_end);
+
+void *kmalloc(size_t size);
+void *kcalloc(size_t n, size_t size);
+void *krealloc(void *p, size_t size);
+void kfree(const void *ptr);
+
+void *page_alloc(int order);
+void page_free(void *addr, int order);
+
+int map_pages(uintptr_t virt, uintptr_t phys, size_t count, uint64_t flags);
+void unmap_pages(uintptr_t virt, size_t count);
+uintptr_t virt_to_phys(uintptr_t virt);
+uintptr_t phys_to_virt(uintptr_t phys);
+
+kmem_cache_t *kmem_cache_create(const char *name, size_t size);
+void *kmem_cache_alloc(kmem_cache_t *cache);
+void kmem_cache_free(kmem_cache_t *cache, void *obj);
+void kmem_cache_destroy(kmem_cache_t *cache);
+
+size_t kmalloc_size(const void *ptr);
+void mm_dump_stats(void);
+
+extern uint64_t pml4_table_phys;
+#define PML4_BASE (pml4_table_phys)
+
+#define list_for_each_safe(pos, n, head) \
+    for (pos = (head)->next, n = pos->next; pos != (head); \
+         pos = n, n = pos->next)
+
+#define list_first_entry(ptr, type, member) \
+    container_of((ptr)->next, type, member)
+
+#define list_for_each_entry(pos, head, member) \
+    for (pos = container_of((head)->next, typeof(*pos), member); \
+         &pos->member != (head); \
+         pos = container_of(pos->member.next, typeof(*pos), member))
+
+static inline void INIT_LIST_HEAD(list_head_t *list)
+{
+    list->next = list;
+    list->prev = list;
+}
+
+static inline void list_add(list_head_t *new, list_head_t *head)
+{
+    new->next = head->next;
+    new->prev = head;
+    head->next->prev = new;
+    head->next = new;
+}
+
+static inline void list_del(list_head_t *entry)
+{
+    entry->next->prev = entry->prev;
+    entry->prev->next = entry->next;
+    entry->next = entry->prev = NULL;
+}
+
+static inline int list_empty(const list_head_t *head)
+{
+    return head->next == head;
+}
+
+#endif

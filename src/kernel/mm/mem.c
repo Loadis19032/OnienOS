@@ -1,562 +1,591 @@
 #include "mem.h"
-#include <stddef.h>
-#include <stdint.h>
-#include <string.h>
+#include "string.h"
+#include "assert.h"
+#include "stdio.h"
+#include "stddef.h"
 
-// Глобальные переменные для управления памятью
-static mem_block_t* heap_start = NULL;
-static mem_block_t* heap_end = NULL;
-static size_t total_ram = 0;
-static size_t used_ram = 0;
-static uint64_t* pml4_table = NULL;
-static size_t total_pages = 0;
-static size_t used_pages = 0;
-static size_t mapped_pages = 0;
+static mm_struct mm = {0};
 
-// Внутренние функции
-static void update_page_stats(void);
-static mem_block_t* coalesce_blocks(mem_block_t* block);
-static void* allocate_large_block(size_t size);
+// ================= Buddy Allocator =================
 
-// Инициализация менеджера памяти
-void mem_init(size_t total_ram_size, void* heap_start_addr) {
-    total_ram = total_ram_size;
-    used_ram = 0;
-    total_pages = total_ram / PAGE_SIZE;
-    used_pages = 0;
+static void buddy_init(buddy_t *buddy, uintptr_t base, size_t size) {
+    memset(buddy, 0, sizeof(*buddy));
+    buddy->base = base;
+    buddy->size = size;
+    buddy->nr_free = size / PAGE_SIZE;
     
-    // Инициализация кучи
-    heap_start = (mem_block_t*)heap_start_addr;
-    heap_start->magic = MAGIC_FREE;
-    heap_start->size = total_ram - sizeof(mem_block_t);
-    heap_start->next = NULL;
-    heap_start->prev = NULL;
-    heap_start->is_free = 1;
-    
-    heap_end = heap_start;
-    
-    // Сохраняем указатель на таблицу PML4
-    pml4_table = (uint64_t*)get_pml4_table();
-    
-    update_page_stats();
-}
-
-// Выравнивание размера блока
-static size_t align_size(size_t size) {
-    if (size < MIN_BLOCK_SIZE) {
-        return MIN_BLOCK_SIZE;
+    for (int i = 0; i <= MAX_ORDER; i++) {
+        INIT_LIST_HEAD(&buddy->free_area[i]);
     }
     
-    // Для больших блоков выравниваем по границе страницы
-    if (size >= PAGE_SIZE) {
-        return PAGE_ALIGN_UP(size);
-    }
-    
-    // Для маленьких блоков выравниваем до 8 байт
-    return (size + 7) & ~7;
-}
-
-// Поиск свободного блока (best-fit алгоритм)
-static mem_block_t* find_free_block(size_t size) {
-    mem_block_t* best = NULL;
-    mem_block_t* current = heap_start;
-    size_t best_diff = SIZE_MAX;
-    
-    while (current) {
-        if (current->is_free && current->size >= size) {
-            // Точное соответствие - сразу возвращаем
-            if (current->size == size) {
-                return current;
-            }
-            
-            // Ищем блок с наименьшей разницей в размере
-            size_t diff = current->size - size;
-            if (diff < best_diff) {
-                best = current;
-                best_diff = diff;
-            }
-        }
-        current = current->next;
-    }
-    
-    return best;
-}
-
-// Разделение блока
-static mem_block_t* split_block(mem_block_t* block, size_t size) {
-    size_t remaining = block->size - size;
-    
-    // Не разделяем если остаток слишком мал
-    if (remaining < sizeof(mem_block_t) + MIN_BLOCK_SIZE) {
-        return block;
-    }
-    
-    // Создаем новый блок из оставшегося пространства
-    mem_block_t* new_block = (mem_block_t*)((uint8_t*)block + sizeof(mem_block_t) + size);
-    new_block->magic = MAGIC_FREE;
-    new_block->size = remaining - sizeof(mem_block_t);
-    new_block->is_free = 1;
-    new_block->prev = block;
-    new_block->next = block->next;
-    
-    if (block->next) {
-        block->next->prev = new_block;
-    }
-    block->next = new_block;
-    
-    if (block == heap_end) {
-        heap_end = new_block;
-    }
-    
-    // Обновляем текущий блок
-    block->size = size;
-    
-    return block;
-}
-
-// Объединение свободных блоков
-static mem_block_t* coalesce_blocks(mem_block_t* block) {
-    // Объединяем с предыдущим блоком
-    if (block->prev && block->prev->is_free) {
-        block->prev->size += block->size + sizeof(mem_block_t);
-        block->prev->next = block->next;
-        
-        if (block->next) {
-            block->next->prev = block->prev;
-        }
-        
-        if (block == heap_end) {
-            heap_end = block->prev;
-        }
-        
-        block = block->prev;
-    }
-    
-    // Объединяем со следующим блоком
-    if (block->next && block->next->is_free) {
-        block->size += block->next->size + sizeof(mem_block_t);
-        block->next = block->next->next;
-        
-        if (block->next) {
-            block->next->prev = block;
-        }
-        
-        if (block->next == NULL) {
-            heap_end = block;
+    int order = MAX_ORDER;
+    while (order >= 0) {
+        size_t block_size = PAGE_SIZE << order;
+        if (size >= block_size) {
+            page_t *page = (page_t *)base;
+            page->order = order;
+            page->refcount = 0;
+            page->flags = 0;
+            list_add(&page->list, &buddy->free_area[order]);
+            base += block_size;
+            size -= block_size;
+        } else {
+            order--;
         }
     }
-    
-    return block;
 }
 
-// Выделение большого блока (выровненного по странице)
-static void* allocate_large_block(size_t size) {
-    // Ищем свободный блок достаточного размера
-    mem_block_t* block = find_free_block(size);
-    if (!block) {
+static void *buddy_alloc(buddy_t *buddy, int order) {
+    if (order > MAX_ORDER || order < 0)
         return NULL;
+
+    int current_order = order;
+    while (current_order <= MAX_ORDER && 
+           list_empty(&buddy->free_area[current_order])) {
+        current_order++;
     }
     
-    // Выравниваем адрес начала блока по границе страницы
-    uint8_t* aligned_start = (uint8_t*)PAGE_ALIGN_UP((uintptr_t)block + sizeof(mem_block_t));
-    size_t aligned_size = PAGE_ALIGN_UP(size);
+    if (current_order > MAX_ORDER)
+        return NULL;
     
-    // Проверяем, можно ли создать новый блок перед выровненной областью
-    if ((uint8_t*)block + sizeof(mem_block_t) < aligned_start) {
-        size_t prefix_size = aligned_start - (uint8_t*)block - sizeof(mem_block_t);
+    list_head_t *list = buddy->free_area[current_order].next;
+    list_del(list);
+    page_t *page = container_of(list, page_t, list);
+    
+    while (current_order > order) {
+        current_order--;
+        page_t *buddy_page = (page_t *)((uintptr_t)page + (PAGE_SIZE << current_order));
         
-        // Если есть место для блока перед выровненной областью
-        if (prefix_size >= sizeof(mem_block_t) + MIN_BLOCK_SIZE) {
-            mem_block_t* prefix_block = block;
-            prefix_block->size = prefix_size;
+        buddy_page->order = current_order;
+        buddy_page->refcount = 0;
+        buddy_page->flags = 0;
+        list_add(&buddy_page->list, &buddy->free_area[current_order]);
+    }
+    
+    page->order = order;
+    page->refcount = 1;
+    buddy->nr_free -= (1 << order);
+    return (void *)page;
+}
+
+static void buddy_free(buddy_t *buddy, void *addr, int order) {
+    if (!addr || order > MAX_ORDER || order < 0)
+        return;
+        
+    page_t *page = (page_t *)addr;
+    uintptr_t page_addr = (uintptr_t)page;
+    
+    while (order < MAX_ORDER) {
+        uintptr_t buddy_addr = page_addr ^ (PAGE_SIZE << order);
+        page_t *buddy_page = (page_t *)buddy_addr;
+        
+        if ((int)buddy_page->order != order || buddy_page->refcount != 0)
+            break;
             
-            // Создаем выровненный блок
-            mem_block_t* aligned_block = (mem_block_t*)(aligned_start - sizeof(mem_block_t));
-            aligned_block->magic = MAGIC_ALLOC;
-            aligned_block->size = aligned_size;
-            aligned_block->is_free = 0;
-            aligned_block->prev = prefix_block;
-            aligned_block->next = block->next;
-            
-            prefix_block->next = aligned_block;
-            
-            if (aligned_block->next) {
-                aligned_block->next->prev = aligned_block;
+        list_head_t *pos, *n;
+        bool found = false;
+        
+        list_for_each_safe(pos, n, &buddy->free_area[order]) {
+            page_t *p = container_of(pos, page_t, list);
+            if (p == buddy_page) {
+                list_del(pos);
+                found = true;
+                break;
             }
+        }
+        
+        if (!found)
+            break;
             
-            if (block == heap_end) {
-                heap_end = aligned_block;
+        if (page_addr > buddy_addr)
+            page = buddy_page;
+            
+        page_addr &= ~((PAGE_SIZE << order) - 1);
+        order++;
+    }
+    
+    page->order = order;
+    page->refcount = 0;
+    list_add(&page->list, &buddy->free_area[order]);
+    buddy->nr_free += (1 << order);
+}
+
+// ================= Slab Allocator =================
+
+static slab_t *kmem_cache_grow(kmem_cache_t *cache) {
+    slab_t *slab = (slab_t *)page_alloc(cache->order);
+    if (!slab)
+        return NULL;
+        
+    INIT_LIST_HEAD(&slab->list);
+    slab->freelist = (void *)(slab + 1);
+    slab->inuse = 0;
+    slab->free = cache->objs_per_slab;
+    slab->cache = cache;
+    
+    char *p = (char *)(slab + 1);
+    for (unsigned int i = 0; i < cache->objs_per_slab - 1; i++) {
+        *(void **)(p + i * cache->obj_size) = p + (i + 1) * cache->obj_size;
+    }
+    *(void **)(p + (cache->objs_per_slab - 1) * cache->obj_size) = NULL;
+    
+    cache->pages += (1 << cache->order);
+    cache->objects += cache->objs_per_slab;
+    
+    return slab;
+}
+
+static void kmem_cache_init(kmem_cache_t *cache, const char *name, size_t size) {
+    strncpy(cache->name, name, sizeof(cache->name)-1);
+    cache->obj_size = ALIGN_UP(size, sizeof(void *));
+    cache->order = 0;
+    
+    while ((size_t)(PAGE_SIZE << cache->order) < cache->obj_size * 16 && 
+           cache->order < (unsigned int)MAX_ORDER) {
+        cache->order++;
+    }
+    
+    cache->objs_per_slab = (PAGE_SIZE << cache->order) / cache->obj_size;
+    INIT_LIST_HEAD(&cache->slabs_full);
+    INIT_LIST_HEAD(&cache->slabs_partial);
+    INIT_LIST_HEAD(&cache->slabs_free);
+    cache->objects = 0;
+    cache->pages = 0;
+}
+
+void *kmem_cache_alloc(kmem_cache_t *cache) {
+    slab_t *slab = NULL;
+    
+    if (!list_empty(&cache->slabs_partial)) {
+        slab = list_first_entry(&cache->slabs_partial, slab_t, list);
+    } else if (!list_empty(&cache->slabs_free)) {
+        slab = list_first_entry(&cache->slabs_free, slab_t, list);
+        list_del(&slab->list);
+        list_add(&slab->list, &cache->slabs_partial);
+    } else {
+        slab = kmem_cache_grow(cache);
+        if (!slab)
+            return NULL;
+        list_add(&slab->list, &cache->slabs_partial);
+    }
+    
+    void *obj = slab->freelist;
+    slab->freelist = *(void **)obj;
+    slab->inuse++;
+    slab->free--;
+    
+    if (slab->free == 0) {
+        list_del(&slab->list);
+        list_add(&slab->list, &cache->slabs_full);
+    }
+    
+    return obj;
+}
+
+void kmem_cache_free(kmem_cache_t *cache, void *obj) {
+    if (!obj || !cache)
+        return;
+        
+    slab_t *slab = (slab_t *)((uintptr_t)obj & PAGE_MASK);
+    
+    if (slab->cache != cache) {
+        printf("kmem_cache_free: Wrong cache for object %p\n", obj);
+        return;
+    }
+    
+    *(void **)obj = slab->freelist;
+    slab->freelist = obj;
+    slab->inuse--;
+    slab->free++;
+    
+    if (slab->inuse == 0) {
+        list_del(&slab->list);
+        list_add(&slab->list, &cache->slabs_free);
+    } else if (slab->inuse == cache->objs_per_slab - 1) {
+        list_del(&slab->list);
+        list_add(&slab->list, &cache->slabs_partial);
+    }
+}
+
+kmem_cache_t *kmem_cache_create(const char *name, size_t size) {
+    if (size > SLAB_MAX_SIZE || size < SLAB_MIN_SIZE)
+        return NULL;
+        
+    kmem_cache_t *cache = (kmem_cache_t *)kmalloc(sizeof(kmem_cache_t));
+    if (!cache)
+        return NULL;
+        
+    kmem_cache_init(cache, name, size);
+    return cache;
+}
+
+void kmem_cache_destroy(kmem_cache_t *cache) {
+    if (!cache)
+        return;
+        
+    slab_t *slab, *tmp;
+    list_for_each_entry_safe(slab, tmp, &cache->slabs_free, list) {
+        page_free(slab, cache->order);
+    }
+    list_for_each_entry_safe(slab, tmp, &cache->slabs_partial, list) {
+        page_free(slab, cache->order);
+    }
+    list_for_each_entry_safe(slab, tmp, &cache->slabs_full, list) {
+        page_free(slab, cache->order);
+    }
+    
+    kfree(cache);
+}
+
+// ================= Memory Manager =================
+
+void mm_init(uintptr_t phys_mem_start, uintptr_t phys_mem_end) {
+    if (mm.initialized)
+        return;
+    
+    mm.phys_offset = 0;
+    uintptr_t virt_start = phys_to_virt(phys_mem_start);
+    uintptr_t virt_end = phys_to_virt(phys_mem_end);
+    
+    virt_start = ALIGN_UP(virt_start, PAGE_SIZE);
+    virt_end = ALIGN_DOWN(virt_end, PAGE_SIZE);
+    
+    if (virt_end <= virt_start) {
+        printf("Error: Invalid memory range: 0x%x - 0x%x\n", virt_start, virt_end);
+        return;
+    }
+    
+    buddy_init(&mm.buddy, virt_start, virt_end - virt_start);
+    
+    const char *names[] = {
+        "kmalloc-16", "kmalloc-32", "kmalloc-64", "kmalloc-128",
+        "kmalloc-256", "kmalloc-512", "kmalloc-1024", "kmalloc-2048"
+    };
+    size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
+    
+    for (int i = 0; i < 8; i++) {
+        kmem_cache_init(&mm.kmalloc_caches[i], names[i], sizes[i]);
+    }
+    
+    mm.initialized = true;
+    printf("Memory manager initialized: %u KB available\n", 
+          (virt_end - virt_start) / 1024);
+}
+
+void *kmalloc(size_t size) {
+    if (!mm.initialized)
+        return NULL;
+        
+    if (size <= SLAB_MAX_SIZE) {
+        for (int i = 0; i < 8; i++) {
+            if (size <= mm.kmalloc_caches[i].obj_size) {
+                return kmem_cache_alloc(&mm.kmalloc_caches[i]);
             }
-            
-            // Создаем блок после выровненной области, если есть место
-            uint8_t* block_end = aligned_start + aligned_size;
-            uint8_t* next_block_start = (uint8_t*)aligned_block + sizeof(mem_block_t) + aligned_size;
-            
-            if (block_end < next_block_start) {
-                size_t suffix_size = next_block_start - block_end;
-                
-                if (suffix_size >= sizeof(mem_block_t) + MIN_BLOCK_SIZE) {
-                    mem_block_t* suffix_block = (mem_block_t*)block_end;
-                    suffix_block->magic = MAGIC_FREE;
-                    suffix_block->size = suffix_size - sizeof(mem_block_t);
-                    suffix_block->is_free = 1;
-                    suffix_block->prev = aligned_block;
-                    suffix_block->next = aligned_block->next;
-                    
-                    aligned_block->next = suffix_block;
-                    
-                    if (suffix_block->next) {
-                        suffix_block->next->prev = suffix_block;
-                    }
-                    
-                    if (aligned_block == heap_end) {
-                        heap_end = suffix_block;
-                    }
-                }
-            }
-            
-            used_ram += aligned_block->size + sizeof(mem_block_t);
-            update_page_stats();
-            return aligned_start;
         }
     }
     
-    // Если не удалось выровнять, просто выделяем обычный блок
-    block = split_block(block, size);
-    block->is_free = 0;
-    block->magic = MAGIC_ALLOC;
+    int order = 0;
+    while ((size_t)(PAGE_SIZE << order) < size && order < MAX_ORDER)
+        order++;
     
-    used_ram += block->size + sizeof(mem_block_t);
-    update_page_stats();
-    
-    return (void*)((uint8_t*)block + sizeof(mem_block_t));
+    return page_alloc(order);
 }
 
-// Выделение памяти
-void* kmalloc(size_t size) {
-    if (size == 0) return NULL;
-    
-    size = align_size(size);
-    
-    // Для больших блоков используем специальный алгоритм
-    if (size >= PAGE_SIZE) {
-        return allocate_large_block(size);
-    }
-    
-    mem_block_t* block = find_free_block(size);
-    if (!block) {
-        return NULL;
-    }
-    
-    block = split_block(block, size);
-    block->is_free = 0;
-    block->magic = MAGIC_ALLOC;
-    
-    used_ram += block->size + sizeof(mem_block_t);
-    update_page_stats();
-    
-    return (void*)((uint8_t*)block + sizeof(mem_block_t));
-}
-
-// Освобождение памяти
-void kfree(void* ptr) {
-    if (!ptr) return;
-    
-    mem_block_t* block = (mem_block_t*)((uint8_t*)ptr - sizeof(mem_block_t));
-    
-    if (block->magic != MAGIC_ALLOC) {
-        return; // Неверный указатель или двойное освобождение
-    }
-    
-    block->magic = MAGIC_FREE;
-    block->is_free = 1;
-    used_ram -= block->size + sizeof(mem_block_t);
-    
-    coalesce_blocks(block);
-    update_page_stats();
-}
-
-// Выделение и обнуление памяти
-void* kcalloc(size_t count, size_t size) {
-    size_t total_size = count * size;
-    void* ptr = kmalloc(total_size);
-    if (ptr) {
-        memset(ptr, 0, total_size);
-    }
+void *kcalloc(size_t n, size_t size) {
+    void *ptr = kmalloc(n * size);
+    if (ptr)
+        memset(ptr, 0, n * size);
     return ptr;
 }
 
-// Изменение размера блока памяти
-void* krealloc(void* ptr, size_t new_size) {
-    if (!ptr) return kmalloc(new_size);
-    if (new_size == 0) {
-        kfree(ptr);
+void *krealloc(void *p, size_t size) {
+    if (!p)
+        return kmalloc(size);
+        
+    if (size == 0) {
+        kfree(p);
         return NULL;
     }
     
-    mem_block_t* block = (mem_block_t*)((uint8_t*)ptr - sizeof(mem_block_t));
-    if (block->magic != MAGIC_ALLOC) {
-        return NULL;
-    }
-    
-    new_size = align_size(new_size);
-    
-    // Если новый размер меньше или равен текущему
-    if (new_size <= block->size) {
-        // Пытаемся разделить блок, если осталось достаточно места
-        if (block->size - new_size >= sizeof(mem_block_t) + MIN_BLOCK_SIZE) {
-            split_block(block, new_size);
-        }
-        return ptr;
-    }
-    
-    // Проверяем, можно ли расшириться в соседний свободный блок
-    if (block->next && block->next->is_free && 
-        (block->size + sizeof(mem_block_t) + block->next->size) >= new_size) {
-        size_t needed = new_size - block->size;
-        
-        // Объединяем блоки
-        block->size += block->next->size + sizeof(mem_block_t);
-        block->next = block->next->next;
-        
-        if (block->next) {
-            block->next->prev = block;
-        }
-        
-        if (block->next == NULL) {
-            heap_end = block;
-        }
-        
-        // Разделяем, если осталось место
-        if (block->size > new_size + sizeof(mem_block_t) + MIN_BLOCK_SIZE) {
-            split_block(block, new_size);
-        }
-        
-        used_ram += (new_size - (block->size - sizeof(mem_block_t)));
-        update_page_stats();
-        return ptr;
-    }
-    
-    // Иначе выделяем новый блок и копируем данные
-    void* new_ptr = kmalloc(new_size);
+    size_t old_size = kmalloc_size(p);
+    void *new_ptr = kmalloc(size);
     if (new_ptr) {
-        memcpy(new_ptr, ptr, block->size);
-        kfree(ptr);
+        memcpy(new_ptr, p, old_size < size ? old_size : size);
+        kfree(p);
     }
     return new_ptr;
 }
 
-// Обновление статистики страниц
-static void update_page_stats() {
-    size_t heap_pages = 0;
-    mem_block_t* current = heap_start;
-    
-    while (current) {
-        if (!current->is_free) {
-            uintptr_t start = (uintptr_t)current;
-            uintptr_t end = start + sizeof(mem_block_t) + current->size;
-            uintptr_t aligned_start = PAGE_ALIGN_DOWN(start);
-            uintptr_t aligned_end = PAGE_ALIGN_UP(end);
-            heap_pages += (aligned_end - aligned_start) / PAGE_SIZE;
-        }
-        current = current->next;
-    }
-    
-    used_pages = heap_pages + mapped_pages;
-}
-
-size_t getusedram() {
-    return (used_pages + mapped_pages) * (PAGE_SIZE / 1024); // в KB
-}
-
-// Получение статистики памяти
-mem_stats_t get_mem_stats() {
-    mem_stats_t stats = {0};
-    stats.total_ram = total_ram;
-    stats.used_ram = used_pages * PAGE_SIZE;
-    stats.free_ram = total_ram - stats.used_ram;
-    
-    // Подсчёт блоков
-    mem_block_t* curr = heap_start;
-    while (curr) {
-        if (curr->is_free) stats.free_blocks++;
-        else stats.allocated_blocks++;
-        curr = curr->next;
-    }
-    
-    return stats;
-}
-
-// Проверка целостности кучи
-int mem_check_integrity(void) {
-    mem_block_t* current = heap_start;
-    while (current) {
-        // Проверка магических чисел
-        if ((current->is_free && current->magic != MAGIC_FREE) ||
-            (!current->is_free && current->magic != MAGIC_ALLOC)) {
-            return -1;
-        }
+void kfree(const void *ptr) {
+    if (!ptr || !mm.initialized)
+        return;
         
-        // Проверка связности списка
-        if (current->next && current->next->prev != current) {
-            return -1;
-        }
+    for (int i = 0; i < 8; i++) {
+        kmem_cache_t *cache = &mm.kmalloc_caches[i];
+        slab_t *slab;
         
-        // Проверка перекрытия блоков
-        if (current->next && 
-            (uint8_t*)current + sizeof(mem_block_t) + current->size > (uint8_t*)current->next) {
-            return -1;
-        }
-        
-        current = current->next;
-    }
-    return 0;
-}
-
-// Функции для работы с виртуальной памятью
-int map_page(uint64_t virtual_addr, uint64_t physical_addr, uint32_t flags) {
-    uint64_t pml4_index = PML4_INDEX(virtual_addr);
-    uint64_t pdp_index = PDP_INDEX(virtual_addr);
-    uint64_t pd_index = PD_INDEX(virtual_addr);
-    uint64_t pt_index = PT_INDEX(virtual_addr);
-
-    // 1. Получаем указатель на PML4
-    uint64_t* pml4 = (uint64_t*)get_pml4_table();
-    
-    // 2. Обрабатываем запись в PML4
-    if (!(pml4[pml4_index] & PAGE_PRESENT)) {
-        // Выделяем новую таблицу PDP (должно быть 4KB выровнено)
-        uint64_t* pdp = (uint64_t*)kmalloc(PAGE_SIZE);
-        if (!pdp) return -1; // Ошибка выделения
-        memset(pdp, 0, PAGE_SIZE);
-        
-        pml4[pml4_index] = ((uint64_t)pdp) | flags | PAGE_PRESENT | PAGE_WRITABLE;
-    }
-    
-    uint64_t* pdp = (uint64_t*)(pml4[pml4_index] & ~0xFFF);
-    
-    // 3. Обрабатываем запись в PDP
-    if (!(pdp[pdp_index] & PAGE_PRESENT)) {
-        uint64_t* pd = (uint64_t*)kmalloc(PAGE_SIZE);
-        if (!pd) return -1;
-        memset(pd, 0, PAGE_SIZE);
-        
-        pdp[pdp_index] = ((uint64_t)pd) | flags | PAGE_PRESENT | PAGE_WRITABLE;
-    }
-    
-    uint64_t* pd = (uint64_t*)(pdp[pdp_index] & ~0xFFF);
-    
-    // 4. Обрабатываем запись в PD
-    if (!(pd[pd_index] & PAGE_PRESENT)) {
-        uint64_t* pt = (uint64_t*)kmalloc(PAGE_SIZE);
-        if (!pt) return -1;
-        memset(pt, 0, PAGE_SIZE);
-        
-        pd[pd_index] = ((uint64_t)pt) | flags | PAGE_PRESENT | PAGE_WRITABLE;
-    }
-    
-    uint64_t* pt = (uint64_t*)(pd[pd_index] & ~0xFFF);
-    
-    // 5. Устанавливаем конечную запись
-    pt[pt_index] = physical_addr | flags | PAGE_PRESENT;
-    
-    // Инвалидация TLB
-    __asm__ volatile("invlpg (%0)" : : "r"(virtual_addr) : "memory");
-    
-    mapped_pages++;
-    update_page_stats();
-
-    return 0;
-}
-
-int unmap_page(uint64_t virtual_addr) {
-    uint64_t pml4_index = PML4_INDEX(virtual_addr);
-    uint64_t pdp_index = PDP_INDEX(virtual_addr);
-    uint64_t pd_index = PD_INDEX(virtual_addr);
-    uint64_t pt_index = PT_INDEX(virtual_addr);
-
-    uint64_t* pml4 = (uint64_t*)get_pml4_table();
-    if (!(pml4[pml4_index] & PAGE_PRESENT)) return -1;
-
-    uint64_t* pdp = (uint64_t*)(pml4[pml4_index] & ~0xFFF);
-    if (!(pdp[pdp_index] & PAGE_PRESENT)) return -1;
-
-    uint64_t* pd = (uint64_t*)(pdp[pdp_index] & ~0xFFF);
-    if (!(pd[pd_index] & PAGE_PRESENT)) return -1;
-
-    uint64_t* pt = (uint64_t*)(pd[pd_index] & ~0xFFF);
-    if (!(pt[pt_index] & PAGE_PRESENT)) return -1;
-
-    pt[pt_index] = 0;
-    __asm__ volatile("invlpg (%0)" : : "r"(virtual_addr) : "memory");
-    
-    if (mapped_pages > 0) mapped_pages--;
-    update_page_stats();
-    
-    return 0;
-}
-
-uint64_t get_physical_addr(uint64_t virtual_addr) {
-    uint64_t pml4_index = PML4_INDEX(virtual_addr);
-    uint64_t pdp_index = PDP_INDEX(virtual_addr);
-    uint64_t pd_index = PD_INDEX(virtual_addr);
-    uint64_t pt_index = PT_INDEX(virtual_addr);
-    
-    if (!(pml4_table[pml4_index] & PAGE_PRESENT)) {
-        return 0;
-    }
-    
-    uint64_t* pdp_table = (uint64_t*)(pml4_table[pml4_index] & ~0xFFF);
-    if (!(pdp_table[pdp_index] & PAGE_PRESENT)) {
-        return 0;
-    }
-    
-    uint64_t* pd_table = (uint64_t*)(pdp_table[pdp_index] & ~0xFFF);
-    if (!(pd_table[pd_index] & PAGE_PRESENT)) {
-        return 0;
-    }
-    
-    uint64_t* pt_table = (uint64_t*)(pd_table[pd_index] & ~0xFFF);
-    if (!(pt_table[pt_index] & PAGE_PRESENT)) {
-        return 0;
-    }
-    
-    return (pt_table[pt_index] & ~0xFFF) | (virtual_addr & 0xFFF);
-}
-
-void* map_physical_memory(uint64_t phys_addr, size_t size, uint32_t flags) {
-    // Выделяем виртуальный диапазон через kmalloc
-    void* virt = kmalloc(size); 
-    if (!virt) return NULL;
-    
-    // Постраничный маппинг
-    for (size_t i = 0; i < size; i += PAGE_SIZE) {
-        if (map_page((uint64_t)virt + i, phys_addr + i, flags) != 0) {
-            // Откат при ошибке
-            for (size_t j = 0; j < i; j += PAGE_SIZE) {
-                unmap_page((uint64_t)virt + j);
+        list_for_each_entry(slab, &cache->slabs_full, list) {
+            if ((uintptr_t)ptr >= (uintptr_t)(slab + 1) && 
+                (uintptr_t)ptr < (uintptr_t)(slab + 1) + (PAGE_SIZE << cache->order)) {
+                kmem_cache_free(cache, (void *)ptr);
+                return;
             }
-            kfree(virt);
-            return NULL;
+        }
+        
+        list_for_each_entry(slab, &cache->slabs_partial, list) {
+            if ((uintptr_t)ptr >= (uintptr_t)(slab + 1) && 
+                (uintptr_t)ptr < (uintptr_t)(slab + 1) + (PAGE_SIZE << cache->order)) {
+                kmem_cache_free(cache, (void *)ptr);
+                return;
+            }
         }
     }
-    return virt;
+    
+    page_t *page = (page_t *)((uintptr_t)ptr & PAGE_MASK);
+    page_free(page, page->order);
 }
 
-void unmap_physical_memory(void* virtual_addr, size_t size) {
-    size = PAGE_ALIGN_UP(size);
-    uint64_t va = (uint64_t)virtual_addr;
+void *page_alloc(int order) {
+    if (!mm.initialized || order > MAX_ORDER || order < 0)
+        return NULL;
+        
+    return buddy_alloc(&mm.buddy, order);
+}
+
+void page_free(void *addr, int order) {
+    if (!addr || !mm.initialized || order > MAX_ORDER || order < 0)
+        return;
+        
+    buddy_free(&mm.buddy, addr, order);
+}
+
+// ================= Virtual Memory =================
+
+// Вспомогательная функция для проверки пустых таблиц
+static bool is_table_empty(uint64_t *table) {
+    for (int i = 0; i < 512; i++) {
+        if (table[i] & PAGE_PRESENT) {
+            return false;
+        }
+    }
+    return true;
+}
+
+int map_pages(uintptr_t virt, uintptr_t phys, size_t count, uint64_t flags) {
+    if (!mm.initialized)
+        return -1;
     
-    for (size_t i = 0; i < size; i += PAGE_SIZE) {
-        unmap_page(va + i);
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(PML4_BASE);
+    
+    for (size_t i = 0; i < count; i++) {
+        uint64_t *pdp, *pd, *pt;
+        uintptr_t cur_virt = virt + i * PAGE_SIZE;
+        uintptr_t cur_phys = phys + i * PAGE_SIZE;
+
+        // PML4
+        uint64_t pml4e = pml4[PML4_INDEX(cur_virt)];
+        if (!(pml4e & PAGE_PRESENT)) {
+            void *pdp_phys = page_alloc(0);
+            if (!pdp_phys) {
+                // Откатываем все предыдущие маппинги
+                unmap_pages(virt, i);
+                return -1;
+            }
+            pdp = (uint64_t *)phys_to_virt((uintptr_t)pdp_phys);
+            memset(pdp, 0, PAGE_SIZE);
+            pml4[PML4_INDEX(cur_virt)] = (uintptr_t)pdp_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        } else {
+            pdp = (uint64_t *)phys_to_virt(pml4e & PAGE_MASK);
+        }
+
+        // PDP
+        uint64_t pdpe = pdp[PDP_INDEX(cur_virt)];
+        if (!(pdpe & PAGE_PRESENT)) {
+            void *pd_phys = page_alloc(0);
+            if (!pd_phys) {
+                unmap_pages(virt, i);
+                return -1;
+            }
+            pd = (uint64_t *)phys_to_virt((uintptr_t)pd_phys);
+            memset(pd, 0, PAGE_SIZE);
+            pdp[PDP_INDEX(cur_virt)] = (uintptr_t)pd_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        } else {
+            pd = (uint64_t *)phys_to_virt(pdpe & PAGE_MASK);
+        }
+
+        // PD
+        uint64_t pde = pd[PD_INDEX(cur_virt)];
+        if (!(pde & PAGE_PRESENT)) {
+            void *pt_phys = page_alloc(0);
+            if (!pt_phys) {
+                unmap_pages(virt, i);
+                return -1;
+            }
+            pt = (uint64_t *)phys_to_virt((uintptr_t)pt_phys);
+            memset(pt, 0, PAGE_SIZE);
+            pd[PD_INDEX(cur_virt)] = (uintptr_t)pt_phys | PAGE_PRESENT | PAGE_WRITABLE | PAGE_USER;
+        } else {
+            pt = (uint64_t *)phys_to_virt(pde & PAGE_MASK);
+        }
+
+        // PT
+        pt[PT_INDEX(cur_virt)] = cur_phys | flags;
+        asm volatile("invlpg (%0)" : : "r" (cur_virt) : "memory");
     }
     
-    kfree(virtual_addr);
+    return 0;
 }
 
-uint64_t get_pml4_table(void) {
-    uint64_t cr3;
-    // Читаем значение регистра CR3 с помощью встроенной ассемблерной вставки
-    __asm__ volatile ("mov %%cr3, %0" : "=r"(cr3));
-    return cr3 & ~0xFFF; // Очищаем флаги, оставляем только физический адрес
+void unmap_pages(uintptr_t virt, size_t count) {
+    if (!mm.initialized)
+        return;
+        
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(PML4_BASE);
+    
+    for (size_t i = 0; i < count; i++) {
+        uintptr_t cur_virt = virt + i * PAGE_SIZE;
+        
+        uint64_t pml4e = pml4[PML4_INDEX(cur_virt)];
+        if (!(pml4e & PAGE_PRESENT))
+            continue;
+            
+        uint64_t *pdp = (uint64_t *)phys_to_virt(pml4e & PAGE_MASK);
+        uint64_t pdpe = pdp[PDP_INDEX(cur_virt)];
+        if (!(pdpe & PAGE_PRESENT))
+            continue;
+            
+        uint64_t *pd = (uint64_t *)phys_to_virt(pdpe & PAGE_MASK);
+        uint64_t pde = pd[PD_INDEX(cur_virt)];
+        if (!(pde & PAGE_PRESENT))
+            continue;
+            
+        uint64_t *pt = (uint64_t *)phys_to_virt(pde & PAGE_MASK);
+        pt[PT_INDEX(cur_virt)] = 0;
+        
+        // Проверяем и освобождаем пустые таблицы
+        if (is_table_empty(pt)) {
+            page_free((void *)(pde & PAGE_MASK), 0);
+            pd[PD_INDEX(cur_virt)] = 0;
+        }
+        
+        if (is_table_empty(pd)) {
+            page_free((void *)(pdpe & PAGE_MASK), 0);
+            pdp[PDP_INDEX(cur_virt)] = 0;
+        }
+        
+        if (is_table_empty(pdp)) {
+            page_free((void *)(pml4e & PAGE_MASK), 0);
+            pml4[PML4_INDEX(cur_virt)] = 0;
+        }
+        
+        asm volatile("invlpg (%0)" : : "r" (cur_virt) : "memory");
+    }
+}
+
+uintptr_t virt_to_phys(uintptr_t virt) {
+    if (!mm.initialized)
+        return 0;
+        
+    uint64_t *pml4 = (uint64_t *)phys_to_virt(PML4_BASE);
+    uint64_t pml4e = pml4[PML4_INDEX(virt)];
+    if (!(pml4e & PAGE_PRESENT))
+        return 0;
+        
+    uint64_t *pdp = (uint64_t *)phys_to_virt(pml4e & PAGE_MASK);
+    uint64_t pdpe = pdp[PDP_INDEX(virt)];
+    
+    // Проверка на 1GB страницы
+    if (pdpe & PAGE_HUGE) {
+        return (pdpe & ~0x3FFFFF) | (virt & 0x3FFFFF);
+    }
+    
+    if (!(pdpe & PAGE_PRESENT))
+        return 0;
+        
+    uint64_t *pd = (uint64_t *)phys_to_virt(pdpe & PAGE_MASK);
+    uint64_t pde = pd[PD_INDEX(virt)];
+    
+    // Проверка на 2MB страницы
+    if (pde & PAGE_HUGE) {
+        return (pde & ~0x1FFFFF) | (virt & 0x1FFFFF);
+    }
+    
+    if (!(pde & PAGE_PRESENT))
+        return 0;
+        
+    uint64_t *pt = (uint64_t *)phys_to_virt(pde & PAGE_MASK);
+    uint64_t pte = pt[PT_INDEX(virt)];
+    if (!(pte & PAGE_PRESENT))
+        return 0;
+        
+    return (pte & PAGE_MASK) | (virt & ~PAGE_MASK);
+}
+
+uintptr_t phys_to_virt(uintptr_t phys) {
+    return phys;
+}
+
+size_t kmalloc_size(const void *ptr) {
+    if (!ptr || !mm.initialized)
+        return 0;
+        
+    for (int i = 0; i < 8; i++) {
+        kmem_cache_t *cache = &mm.kmalloc_caches[i];
+        slab_t *slab;
+        
+        list_for_each_entry(slab, &cache->slabs_full, list) {
+            if ((uintptr_t)ptr >= (uintptr_t)(slab + 1) && 
+                (uintptr_t)ptr < (uintptr_t)(slab + 1) + (PAGE_SIZE << cache->order)) {
+                return cache->obj_size;
+            }
+        }
+        
+        list_for_each_entry(slab, &cache->slabs_partial, list) {
+            if ((uintptr_t)ptr >= (uintptr_t)(slab + 1) && 
+                (uintptr_t)ptr < (uintptr_t)(slab + 1) + (PAGE_SIZE << cache->order)) {
+                return cache->obj_size;
+            }
+        }
+    }
+    
+    page_t *page = (page_t *)((uintptr_t)ptr & PAGE_MASK);
+    return PAGE_SIZE << page->order;
+}
+
+void mm_dump_stats(void) {
+    if (!mm.initialized) {
+        printf("Memory manager not initialized\n");
+        return;
+    }
+    
+    printf("Memory Manager Statistics:\n");
+    printf("  Buddy Allocator:\n");
+    printf("    Total free pages: %lu\n", mm.buddy.nr_free);
+    for (int i = 0; i <= MAX_ORDER; i++) {
+        int count = 0;
+        list_head_t *pos;
+        list_for_each(pos, &mm.buddy.free_area[i]) {
+            count++;
+        }
+        printf("    Order %d: %d blocks\n", i, count);
+    }
+    
+    printf("\n  Slab Allocators:\n");
+    for (int i = 0; i < 8; i++) {
+        kmem_cache_t *cache = &mm.kmalloc_caches[i];
+        int full = 0, partial = 0, free = 0;
+        slab_t *slab;
+        
+        list_for_each_entry(slab, &cache->slabs_full, list)
+            full++;
+            
+        list_for_each_entry(slab, &cache->slabs_partial, list)
+            partial++;
+            
+        list_for_each_entry(slab, &cache->slabs_free, list)
+            free++;
+        
+        printf("    %s: objsize=%zu slabs(full=%d, partial=%d, free=%d)\n",
+              cache->name, cache->obj_size, full, partial, free);
+    }
 }

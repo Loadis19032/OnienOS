@@ -1,6 +1,23 @@
 #include "stdlib.h"
 #include <ctype.h>
 #include <math.h>
+#include "../../kernel/mm/mem.h"
+
+void* malloc(size_t size) {
+    return kmalloc(size);
+}
+
+void* realloc(void* ptr, size_t size) {
+    return krealloc(ptr, size);
+}
+
+void* calloc(size_t num, size_t size) {
+    return kcalloc(num, size);
+}
+
+void free(void* ptr) {
+    return kfree(ptr);
+}
 
 int atoi(const char *str) {
     int result = 0;
@@ -76,6 +93,43 @@ double atof(const char *str) {
     }
 
     return sign * result;
+}
+
+static void reverse(char* str, int length) {
+    int start = 0;
+    int end = length - 1;
+    while (start < end) {
+        char temp = str[start];
+        str[start] = str[end];
+        str[end] = temp;
+        start++;
+        end--;
+    }
+}
+
+char* itoa(int num, char* str) {
+    int i = 0;
+    int is_negative = 0;
+
+    if (num < 0) {
+        is_negative = 1;
+        num = -num;
+    }
+
+    do {
+        str[i++] = num % 10 + '0';
+        num /= 10;                
+    } while (num > 0);
+
+    if (is_negative) {
+        str[i++] = '-';
+    }
+
+    str[i] = '\0';
+
+    reverse(str, i);
+
+    return str;
 }
 
 long int strtol(const char *str, char **endptr, int base) {

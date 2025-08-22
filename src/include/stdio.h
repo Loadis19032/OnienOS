@@ -26,6 +26,11 @@
 
 int putchar(int c);
 void clear();
+
+int vsprintf(char* buffer, const char* format, va_list args);
+int vsnprintf(char* buffer, size_t size, const char* format, va_list args);
+int sprintf(char* buffer, const char* format, ...);
+int snprintf(char* buffer, size_t size, const char* format, ...);
 int printf(const char* fmt, ...);
 
 void setcursor(uint8_t x, uint8_t y);

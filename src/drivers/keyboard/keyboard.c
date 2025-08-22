@@ -5,7 +5,6 @@
 #include <stdio.h>
 
 #define KEYBOARD_BUFFER_SIZE 256
-#define KEY_RELEASED_MASK 0x80
 
 typedef struct {
     bool shift_left;
@@ -19,6 +18,9 @@ static KeyboardModifiers keyboard_modifiers;
 static char keyboard_buffer[KEYBOARD_BUFFER_SIZE];
 static volatile uint32_t keyboard_head = 0;
 static volatile uint32_t keyboard_tail = 0;
+
+// Массив состояний клавиш (нажата/отпущена)
+static bool key_states[256] = {0};
 
 static const char scancode_lower[128] = {
     0,  27, '1', '2', '3', '4', '5', '6', '7', '8', '9', '0', '-', '=', '\b',
@@ -48,31 +50,32 @@ static char scancode_to_ascii(uint8_t scancode) {
 void keyboard_handler() {
     uint8_t scancode = inb(0x60);
     
+    // Обновляем состояние клавиши
     if (scancode & KEY_RELEASED_MASK) {
         uint8_t released_key = scancode & ~KEY_RELEASED_MASK;
+        key_states[released_key] = false;
+        
         switch(released_key) {
-            case 0x2A: keyboard_modifiers.shift_left = false; break;
-            case 0x36: keyboard_modifiers.shift_right = false; break;
-            case 0x1D: keyboard_modifiers.ctrl = false; break;
-            case 0x38: keyboard_modifiers.alt = false; break;
+            case KEY_LEFTSHIFT: keyboard_modifiers.shift_left = false; break;
+            case KEY_RIGHTSHIFT: keyboard_modifiers.shift_right = false; break;
+            case KEY_LEFTCTRL: keyboard_modifiers.ctrl = false; break;
+            case KEY_LEFTALT: keyboard_modifiers.alt = false; break;
         }
         return;
+    } else {
+        key_states[scancode] = true;
     }
 
     switch(scancode) {
-        case 0x2A: keyboard_modifiers.shift_left = true; return;
-        case 0x36: keyboard_modifiers.shift_right = true; return;
-        case 0x1D: keyboard_modifiers.ctrl = true; return;
-        case 0x38: keyboard_modifiers.alt = true; return;
-        case 0x3A: keyboard_modifiers.caps_lock = !keyboard_modifiers.caps_lock; return;
-
-        
+        case KEY_LEFTSHIFT: keyboard_modifiers.shift_left = true; return;
+        case KEY_RIGHTSHIFT: keyboard_modifiers.shift_right = true; return;
+        case KEY_LEFTCTRL: keyboard_modifiers.ctrl = true; return;
+        case KEY_LEFTALT: keyboard_modifiers.alt = true; return;
+        case KEY_CAPSLOCK: keyboard_modifiers.caps_lock = !keyboard_modifiers.caps_lock; return;
     }
 
     char c = scancode_to_ascii(scancode);
     if (c == 0) return;
-
-    //putchar(c);
 
     uint32_t next = (keyboard_head + 1) % KEYBOARD_BUFFER_SIZE;
     if (next != keyboard_tail) {
@@ -86,9 +89,9 @@ void keyboard_handler() {
 void init_keyboard() {
     keyboard_modifiers = (KeyboardModifiers){0};
     keyboard_head = keyboard_tail = 0;
+    memset(key_states, 0, sizeof(key_states));
     register_irq_handler(1, &keyboard_handler);
     outb(0x21, inb(0x21) & ~0x02);
-    asm volatile ("sti");
 }
 
 bool kbhit() {
@@ -102,6 +105,11 @@ char getch() {
     return c;
 }
 
+bool getkey(uint8_t keycode) {
+    if (keycode >= sizeof(key_states)) return false;
+    return key_states[keycode];
+}
+
 char* fgets(char* buf, uint32_t size) {
     if (!buf || size == 0) return NULL;
 
@@ -109,16 +117,19 @@ char* fgets(char* buf, uint32_t size) {
     while (i < size - 1) {
         char c = getch();
         
-
-        if (c == '\b') {
+        if (c == '\b') { // Обработка backspace
             if (i > 0) {
                 i--;
-                putchar('\b'); putchar(' '); putchar('\b');
+                putchar('\b'); 
+                putchar(' '); 
+                putchar('\b');
+                buf[i] = '\0'; // Явное обновление буфера
             }
             continue;
         }
         
         buf[i++] = c;
+        putchar(c); // Вывод символа
         if (c == '\n') break;
     }
     

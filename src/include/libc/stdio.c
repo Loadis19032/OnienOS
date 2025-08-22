@@ -79,48 +79,119 @@ static void scroll(void) {
     }
 }
 
+#define STATE_NORMAL 0
+#define STATE_ESC    1
+#define STATE_CSI    2
+
+static int ansi_state = STATE_NORMAL;
+static int ansi_params[16];
+static int ansi_count = 0;
+
+static void handle_ansi_command(char c) {
+    switch (c) {
+        case 'm':
+            for (int i = 0; i <= ansi_count; i++) {
+                int param = ansi_params[i];
+                if (param == 0) {
+                    current_color = VGA_COLOR(VGA_BLACK, VGA_LGRAY);
+                } else if (param >= 30 && param <= 37) {
+                    static const uint8_t ansi_to_vga[] = {VGA_BLACK, VGA_RED, VGA_GREEN, VGA_BROWN, VGA_BLUE, VGA_MAGENTA, VGA_CYAN, VGA_LGRAY};
+                    current_color = (current_color & 0xF0) | ansi_to_vga[param - 30];
+                } else if (param >= 40 && param <= 47) {
+                    static const uint8_t ansi_to_vga[] = {VGA_BLACK, VGA_RED, VGA_GREEN, VGA_BROWN, VGA_BLUE, VGA_MAGENTA, VGA_CYAN, VGA_LGRAY};
+                    current_color = (current_color & 0x0F) | (ansi_to_vga[param - 40] << 4);
+                }
+            }
+            break;
+        case 'J':
+            if (ansi_params[0] == 2) clear();
+            break;
+        case 'K':
+            if (ansi_params[0] == 0) {
+                for (int x = cursor_x; x < WIDTH; x++)
+                    vga_buffer[cursor_y * WIDTH + x] = (current_color << 8) | ' ';
+            }
+            break;
+        case 'H':
+            cursor_x = ansi_params[1] ? ansi_params[1] - 1 : 0;
+            cursor_y = ansi_params[0] ? ansi_params[0] - 1 : 0;
+            cursor_x = MIN(WIDTH-1, MAX(0, cursor_x));
+            cursor_y = MIN(HEIGHT-1, MAX(0, cursor_y));
+            setcursor(cursor_x, cursor_y);
+            break;
+    }
+}
+
 int putchar(int c) {
-    if (c == '\n') {
-        cursor_x = 0;
-        if (++cursor_y >= HEIGHT) {
-            scroll();
-            cursor_y = HEIGHT - 1;
+    if (cursor_x >= 80 || cursor_y >= 25) return 0;
+
+    if (ansi_state == STATE_NORMAL) {
+        if (c == '\033') {
+            ansi_state = STATE_ESC;
+            return 0;
         }
-        return c;
-    }
-    
-    if (c == '\r') {
-        cursor_x = 0;
-        return c;
-    }
-    
-    if (c == '\t') {
-        cursor_x = (cursor_x + 8) & ~7;
-        if (cursor_x >= WIDTH) {
+
+        if (c == '\b') {
+            if (cursor_x > 0) cursor_x--;
+            else if (cursor_y > 0) { cursor_y--; cursor_x = WIDTH-1; }
+            vga_buffer[cursor_y * WIDTH + cursor_x] = (current_color << 8) | ' ';
+            setcursor(cursor_x, cursor_y);
+            return c;
+        }
+        if (c == '\n') {
             cursor_x = 0;
             if (++cursor_y >= HEIGHT) {
                 scroll();
                 cursor_y = HEIGHT - 1;
             }
+            setcursor(cursor_x, cursor_y);
+            return c;
         }
-        return c;
-    }
-    
-    if (c >= ' ') {
-        if (cursor_y < HEIGHT && cursor_x < WIDTH) {
+        if (c >= ' ') {
             vga_buffer[cursor_y * WIDTH + cursor_x] = (current_color << 8) | c;
-        }
-        
-        if (++cursor_x >= WIDTH) {
-            cursor_x = 0;
-            if (++cursor_y >= HEIGHT) {
-                scroll();
-                cursor_y = HEIGHT - 1;
+            if (++cursor_x >= WIDTH) {
+                cursor_x = 0;
+                if (++cursor_y >= HEIGHT) {
+                    scroll();
+                    cursor_y = HEIGHT - 1;
+                }
             }
+            setcursor(cursor_x, cursor_y);
         }
+        return c;
+    } else if (ansi_state == STATE_ESC) {
+        ansi_state = (c == '[') ? STATE_CSI : STATE_NORMAL;
+        return 0;
+    } else if (ansi_state == STATE_CSI) {
+        if (c >= '0' && c <= '9') {
+            if (ansi_count < 16) {
+                ansi_params[ansi_count] = ansi_params[ansi_count] * 10 + (c - '0');
+            }
+        } else if (c == ';') {
+            if (ansi_count < 15) ansi_count++;
+        } else {
+            handle_ansi_command(c);
+            ansi_state = STATE_NORMAL;
+            ansi_count = 0;
+            for (int i = 0; i < 16; i++) ansi_params[i] = 0;
+        }
+        return 0;
     }
-    
     return c;
+}
+
+void move_cursor(int8_t dx, int8_t dy) {
+    int16_t new_x = cursor_x + dx;
+    int16_t new_y = cursor_y + dy;
+    
+    if (new_x < 0) new_x = 0;
+    if (new_x >= WIDTH) new_x = WIDTH - 1;
+    if (new_y < 0) new_y = 0;
+    if (new_y >= HEIGHT) new_y = HEIGHT - 1;
+    
+    cursor_x = new_x;
+    cursor_y = new_y;
+    setcursor(cursor_x, cursor_y);
 }
 
 typedef struct {
@@ -386,6 +457,271 @@ void format_float(double num, format_flags_t *flags) {
     if (flags->left_align && padding > 0) {
         print_repeat(' ', padding);
     }
+}
+
+typedef struct {
+    char* buffer;
+    size_t size;
+    size_t position;
+} buffer_state_t;
+
+static void buffer_write_char(char c, buffer_state_t* state) {
+    if (state->position < state->size - 1) {
+        state->buffer[state->position++] = c;
+    } else if (state->position < state->size) {
+        state->buffer[state->position++] = '\0';
+    }
+}
+
+static void buffer_write_string(const char* str, buffer_state_t* state) {
+    if (!str) str = "(null)";
+    
+    while (*str && state->position < state->size - 1) {
+        state->buffer[state->position++] = *str++;
+    }
+    
+    if (state->position < state->size) {
+        state->buffer[state->position] = '\0';
+    }
+}
+
+static void buffer_write_number(long long num, int base, bool uppercase, buffer_state_t* state) {
+    char buffer[65];
+    char* ptr = buffer + sizeof(buffer) - 1;
+    *ptr = '\0';
+    
+    bool negative = false;
+    unsigned long long unum;
+    
+    if (num < 0 && base == 10) {
+        negative = true;
+        unum = -num;
+    } else {
+        unum = num;
+    }
+    
+    const char* digits = uppercase ? "0123456789ABCDEF" : "0123456789abcdef";
+    
+    do {
+        *--ptr = digits[unum % base];
+        unum /= base;
+    } while (unum > 0);
+    
+    if (negative) {
+        *--ptr = '-';
+    }
+    
+    buffer_write_string(ptr, state);
+}
+
+int vsprintf(char* buffer, const char* format, va_list args) {
+    buffer_state_t state = {buffer, SIZE_MAX, 0};
+    
+    const char *fmt = format;
+    
+    while (*fmt) {
+        if (*fmt != '%') {
+            buffer_write_char(*fmt, &state);
+            fmt++;
+            continue;
+        }
+        
+        fmt++;
+        
+        if (*fmt == '%') {
+            buffer_write_char('%', &state);
+            fmt++;
+            continue;
+        }
+        
+        format_flags_t flags;
+        fmt = parse_flags(fmt, &flags);
+        
+        switch (*fmt) {
+            case 'c': {
+                int c = va_arg(args, int);
+                buffer_write_char((char)c, &state);
+                break;
+            }
+            
+            case 's': {
+                char *str = va_arg(args, char*);
+                buffer_write_string(str, &state);
+                break;
+            }
+            
+            case 'd':
+            case 'i': {
+                int num = va_arg(args, int);
+                buffer_write_number(num, 10, false, &state);
+                break;
+            }
+            
+            case 'u': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 10, false, &state);
+                break;
+            }
+            
+            case 'o': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 8, false, &state);
+                break;
+            }
+            
+            case 'x': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 16, false, &state);
+                break;
+            }
+            
+            case 'X': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 16, true, &state);
+                break;
+            }
+            
+            case 'p': {
+                void *ptr = va_arg(args, void*);
+                buffer_write_string("0x", &state);
+                buffer_write_number((unsigned long)ptr, 16, false, &state);
+                break;
+            }
+            
+            case 'n': {
+                int *ptr = va_arg(args, int*);
+                if (ptr) *ptr = state.position;
+                break;
+            }
+            
+            default:
+                buffer_write_char('%', &state);
+                buffer_write_char(*fmt, &state);
+                break;
+        }
+        
+        fmt++;
+    }
+    
+    if (state.position < state.size) {
+        state.buffer[state.position] = '\0';
+    }
+    
+    return state.position;
+}
+
+int vsnprintf(char* buffer, size_t size, const char* format, va_list args) {
+    buffer_state_t state = {buffer, size, 0};
+    
+    const char *fmt = format;
+    
+    while (*fmt) {
+        if (*fmt != '%') {
+            buffer_write_char(*fmt, &state);
+            fmt++;
+            continue;
+        }
+        
+        fmt++;
+        
+        if (*fmt == '%') {
+            buffer_write_char('%', &state);
+            fmt++;
+            continue;
+        }
+        
+        format_flags_t flags;
+        fmt = parse_flags(fmt, &flags);
+        
+        switch (*fmt) {
+            case 'c': {
+                int c = va_arg(args, int);
+                buffer_write_char((char)c, &state);
+                break;
+            }
+            
+            case 's': {
+                char *str = va_arg(args, char*);
+                buffer_write_string(str, &state);
+                break;
+            }
+            
+            case 'd':
+            case 'i': {
+                int num = va_arg(args, int);
+                buffer_write_number(num, 10, false, &state);
+                break;
+            }
+            
+            case 'u': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 10, false, &state);
+                break;
+            }
+            
+            case 'o': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 8, false, &state);
+                break;
+            }
+            
+            case 'x': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 16, false, &state);
+                break;
+            }
+            
+            case 'X': {
+                unsigned int num = va_arg(args, unsigned int);
+                buffer_write_number(num, 16, true, &state);
+                break;
+            }
+            
+            case 'p': {
+                void *ptr = va_arg(args, void*);
+                buffer_write_string("0x", &state);
+                buffer_write_number((unsigned long)ptr, 16, false, &state);
+                break;
+            }
+            
+            case 'n': {
+                int *ptr = va_arg(args, int*);
+                if (ptr) *ptr = state.position;
+                break;
+            }
+            
+            default:
+                buffer_write_char('%', &state);
+                buffer_write_char(*fmt, &state);
+                break;
+        }
+        
+        fmt++;
+    }
+    
+    if (state.position < state.size) {
+        state.buffer[state.position] = '\0';
+    } else if (size > 0) {
+        state.buffer[size - 1] = '\0';
+    }
+    
+    return state.position;
+}
+
+int sprintf(char* buffer, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    int result = vsprintf(buffer, format, args);
+    va_end(args);
+    return result;
+}
+
+int snprintf(char* buffer, size_t size, const char* format, ...) {
+    va_list args;
+    va_start(args, format);
+    int result = vsnprintf(buffer, size, format, args);
+    va_end(args);
+    return result;
 }
 
 int printf(const char *format, ...) {
