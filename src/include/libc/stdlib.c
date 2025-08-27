@@ -196,3 +196,41 @@ int rand(void) {
 void srand(unsigned int seed) {
     next = seed;
 }
+
+static void swap(void *a, void *b, size_t size) {
+    char *temp = malloc(size);
+    memcpy(temp, a, size);
+    memcpy(a, b, size);
+    memcpy(b, temp, size);
+    free(temp);
+}
+
+void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *)) {
+    if (nmemb <= 1) return;
+    
+    char *array = (char*)base;
+    
+    char *mid = array + (nmemb / 2) * size;
+    char *end = array + (nmemb - 1) * size;
+    
+    if (compar(array, mid) > 0) swap(array, mid, size);
+    if (compar(mid, end) > 0) swap(mid, end, size);
+    if (compar(array, mid) > 0) swap(array, mid, size);
+    
+    char *pivot = mid;
+    char *i = array - size;
+    
+    for (char *j = array; j <= end; j += size) {
+        if (compar(j, pivot) <= 0) {
+            i += size;
+            swap(i, j, size);
+        }
+    }
+    
+    size_t pivot_index = (i - array) / size;
+    size_t left_count = pivot_index;
+    size_t right_count = nmemb - pivot_index - 1;
+    
+    qsort(array, left_count, size, compar);
+    qsort(i + size, right_count, size, compar);
+}

@@ -79,7 +79,6 @@ typedef struct {
     size_t size;
 } buddy_t;
 
-// Предварительное объявление структуры kmem_cache
 typedef struct kmem_cache kmem_cache_t;
 
 typedef struct slab {

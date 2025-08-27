@@ -1,7 +1,7 @@
 CC = x86_64-elf-gcc
 ASM = nasm
 LD = x86_64-elf-ld
-CFLAGS = -c -ffreestanding -nostdlib -mcmodel=medium -mno-red-zone -Wall -Wextra -I src/include/ -O2 -fno-stack-protector
+CFLAGS = -c -ffreestanding -nostdlib -mcmodel=medium -mno-red-zone -Wall -Wextra -I src/include/ -I"src/kernel/fs/include/" -O2 -fno-stack-protector
 ASMFLAGS = -f elf64
 LDFLAGS = -n -T linker.ld
 QEMU = qemu-system-x86_64 -cdrom Pros64.iso -hda disk -boot d -d int

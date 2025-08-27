@@ -28,6 +28,8 @@ char* strstr(const char* haystack, const char* needle);
 char* strtok(char* str, const char* delim);
 char *strtok_r(char *str, const char *delim, char **saveptr);
 char* strdup(const char* s);
+size_t strlcpy(char *dst, const char *src, size_t dstsize);
+size_t strlcat(char *dst, const char *src, size_t size);
 
 void* memset(void* s, int c, size_t n);
 size_t strlen(const char* s);

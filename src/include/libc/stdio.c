@@ -147,6 +147,12 @@ int putchar(int c) {
             setcursor(cursor_x, cursor_y);
             return c;
         }
+        if (c == '\t') {
+            for (int i = 1; i < 4; i++) {
+                cursor_x++;
+            }
+            setcursor(cursor_x, cursor_y);
+        }
         if (c >= ' ') {
             vga_buffer[cursor_y * WIDTH + cursor_x] = (current_color << 8) | c;
             if (++cursor_x >= WIDTH) {

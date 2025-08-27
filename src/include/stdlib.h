@@ -12,6 +12,7 @@ int atoi(const char *str);
 double atof(const char *str);
 char* itoa(int num, char* str);
 long int strtol(const char *str, char **endptr, int base);
+void qsort(void *base, size_t nmemb, size_t size, int (*compar)(const void *, const void *));
 
 int rand(void);
 void srand(unsigned int seed);

@@ -34,4 +34,7 @@ double copysign(double x, double y);
 double atan(double x);
 double atan2(double y, double x);
 
+double fmin(double a, double b);
+double fmax(double a, double b);
+
 #endif // MATH_H

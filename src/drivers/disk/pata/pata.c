@@ -132,8 +132,6 @@ int ata_identify(ata_device_t *dev) {
 }
 
 int ata_read_sectors(ata_device_t *dev, uint32_t lba, uint8_t count, void *buffer) {
-    lba += 1;
-
     if (!dev->exists || count == 0) {
         printf("dev exists: %d, count: %d", dev->exists, count);
         return -1;
@@ -185,8 +183,6 @@ int ata_read_sectors(ata_device_t *dev, uint32_t lba, uint8_t count, void *buffe
 }
 
 int ata_write_sectors(ata_device_t *dev, uint32_t lba, uint8_t count, const void *buffer) {
-    lba += 1;
-
     if (!dev->exists || count == 0) {
         return -1;
     }
@@ -296,4 +292,30 @@ ata_device_t* get_ata_device(int drive) {
     }
     
     return NULL;
+}
+
+
+void debug_lba_registers(ata_device_t *dev, uint32_t lba, uint8_t count) {
+    printf("LBA: 0x%X, Count: %d\n", lba, count);
+    printf("Registers: ");
+    printf("SECCOUNT: 0x%X, ", inb(dev->base + ATA_REG_SECCOUNT));
+    printf("LBA_LOW: 0x%X, ", inb(dev->base + ATA_REG_LBA_LOW));
+    printf("LBA_MID: 0x%X, ", inb(dev->base + ATA_REG_LBA_MID));
+    printf("LBA_HIGH: 0x%X, ", inb(dev->base + ATA_REG_LBA_HIGH));
+    printf("DRIVE: 0x%X\n", inb(dev->base + ATA_REG_DRIVE));
+}
+
+int ata_read_sectors_debug(ata_device_t *dev, uint32_t lba, uint8_t count, void *buffer) {
+    printf("=== READ DEBUG ===\n");
+    debug_lba_registers(dev, lba, count);
+    
+    // Вызов обычной функции чтения
+    int result = ata_read_sectors(dev, lba, count, buffer);
+    
+    printf("Status: 0x%X, Error: 0x%X\n", 
+           inb(dev->base + ATA_REG_STATUS),
+           inb(dev->base + ATA_REG_ERROR));
+    printf("=== END DEBUG ===\n");
+    
+    return result;
 }

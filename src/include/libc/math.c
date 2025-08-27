@@ -309,3 +309,11 @@ double atan2(double y, double x) {
         }
     }
 }
+
+double fmin(double a, double b) {
+    return a < b ? a : b;
+}
+
+double fmax(double a, double b) {
+    return a > b ? a : b;
+}

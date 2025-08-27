@@ -11,13 +11,13 @@ header_start:
 
     dd 0x100000000 - (0xe85250d6 + 0 + (header_end - header_start))
 
-    align 8
-    dw 5       
-    dw 1       
-    dd 20      
-    dd 1024
-    dd 768
-    dd 32           
+    ;align 8
+    ;dw 5       
+    ;dw 1       
+    ;dd 20      
+    ;dd 1024
+    ;dd 768
+    ;dd 32
 
     align 8
     dw 0            
@@ -229,6 +229,9 @@ long_mode_start:
     mov gs, ax
     mov ss, ax
     
+    mov esp, esp
+    mov edi, [esp+0]
+    mov edi, [esp+4]
     mov rsp, stack_top
     
     cld
