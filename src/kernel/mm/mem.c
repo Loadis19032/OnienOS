@@ -6,6 +6,12 @@
 
 static mm_struct mm = {0};
 
+static const char *names[] = {
+    "kmalloc-16", "kmalloc-32", "kmalloc-64", "kmalloc-128",
+    "kmalloc-256", "kmalloc-512", "kmalloc-1024", "kmalloc-2048"
+};
+static size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
+
 // ================= Buddy Allocator =================
 
 static void buddy_init(buddy_t *buddy, uintptr_t base, size_t size) {
@@ -138,6 +144,7 @@ static slab_t *kmem_cache_grow(kmem_cache_t *cache) {
 static void kmem_cache_init(kmem_cache_t *cache, const char *name, size_t size) {
     strncpy(cache->name, name, sizeof(cache->name)-1);
     cache->obj_size = ALIGN_UP(size, sizeof(void *));
+
     cache->order = 0;
     
     while ((size_t)(PAGE_SIZE << cache->order) < cache->obj_size * 16 && 
@@ -256,13 +263,7 @@ void mm_init(uintptr_t phys_mem_start, uintptr_t phys_mem_end) {
     }
     
     buddy_init(&mm.buddy, virt_start, virt_end - virt_start);
-    
-    const char *names[] = {
-        "kmalloc-16", "kmalloc-32", "kmalloc-64", "kmalloc-128",
-        "kmalloc-256", "kmalloc-512", "kmalloc-1024", "kmalloc-2048"
-    };
-    size_t sizes[] = {16, 32, 64, 128, 256, 512, 1024, 2048};
-    
+
     for (int i = 0; i < 8; i++) {
         kmem_cache_init(&mm.kmalloc_caches[i], names[i], sizes[i]);
     }

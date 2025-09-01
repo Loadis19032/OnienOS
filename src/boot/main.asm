@@ -11,13 +11,13 @@ header_start:
 
     dd 0x100000000 - (0xe85250d6 + 0 + (header_end - header_start))
 
-    ;align 8
-    ;dw 5       
-    ;dw 1       
-    ;dd 20      
-    ;dd 1024
-    ;dd 768
-    ;dd 32
+    align 8
+    dw 5
+    dw 1       
+    dd 20      
+    dd 1024
+    dd 768
+    dd 32
 
     align 8
     dw 0            
@@ -59,6 +59,12 @@ error_success_msg db 'Successfully entered long mode!', 0
 global pml4_table_phys
 pml4_table_phys: dq 0
 
+global multiboot_magic
+multiboot_magic: dd 0
+
+global multiboot_info
+multiboot_info: dq 0
+
 section .text
 bits 32
 global _start
@@ -66,8 +72,11 @@ global _start
 _start:
     mov esp, stack_top
     
-    push ebx
-    push eax
+    mov [multiboot_magic], eax
+    mov [multiboot_info], ebx
+
+    ;push ebx
+    ;push eax
 
     call check_cpuid
     test eax, eax
@@ -208,8 +217,10 @@ print_string:
     pop eax
     ret
 
+
 bits 64
 extern kmain
+
 long_mode_start:    
     mov rax, cr0
     and ax, ~(1 << 2)
@@ -229,14 +240,7 @@ long_mode_start:
     mov gs, ax
     mov ss, ax
     
-    mov esp, esp
-    mov edi, [esp+0]
-    mov edi, [esp+4]
-    mov rsp, stack_top
-    
-    cld
-    
-
+    cld 
 
     call kmain
     

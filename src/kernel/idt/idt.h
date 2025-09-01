@@ -41,6 +41,8 @@ extern void isr24(), isr25(), isr26(), isr27(), isr28(), isr29(), isr30(), isr31
 extern void irq0(), irq1(), irq2(), irq3(), irq4(), irq5(), irq6(), irq7();
 extern void irq8(), irq9(), irq10(), irq11(), irq12(), irq13(), irq14(), irq15();
 
+extern void isr45(void);
+
 void idt_init();
 void idt_set_gate(uint8_t num, void* handler, uint8_t flags);
 void exception_handler(struct registers* regs);

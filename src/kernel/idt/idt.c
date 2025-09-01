@@ -31,6 +31,10 @@ void idt_set_gate(uint8_t num, void* handler, uint8_t flags) {
     idt[num].reserved = 0;
 }
 
+void isr45_handler() {
+    printf("Hello, interputters 0x45!\n");
+}
+
 void idt_init() {
     idtp.limit = sizeof(struct idt_entry) * IDT_ENTRIES - 1;
     idtp.base = (uint64_t)&idt;
@@ -67,6 +71,8 @@ void idt_init() {
     idt_set_gate(42, irq10, 0x8E); idt_set_gate(43, irq11, 0x8E);
     idt_set_gate(44, irq12, 0x8E); idt_set_gate(45, irq13, 0x8E);
     idt_set_gate(46, irq14, 0x8E); idt_set_gate(47, irq15, 0x8E);
+
+    idt_set_gate(0x45, isr45, 0x8E); 
 
     asm volatile("lidt %0" : : "m"(idtp));
 }

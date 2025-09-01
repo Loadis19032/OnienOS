@@ -1,6 +1,7 @@
 section .text
 extern exception_handler
 extern irq_handler
+extern isr45_handler
 
 %macro ISR_NOERRCODE 1
 global isr%1
@@ -152,3 +153,53 @@ irq_common_stub:
     
     add rsp, 16
     iretq
+
+
+
+global isr45
+isr45:
+    ; Сохраняем все регистры вручную
+    push rax
+    push rcx
+    push rdx
+    push rbx
+    push rsp
+    push rbp
+    push rsi
+    push rdi
+    push r8
+    push r9
+    push r10
+    push r11
+    push r12
+    push r13
+    push r14
+    push r15
+    
+    ; Вызываем C-обработчик
+    call isr45_handler
+    
+    ; Восстанавливаем регистры
+    pop r15
+    pop r14
+    pop r13
+    pop r12
+    pop r11
+    pop r10
+    pop r9
+    pop r8
+    pop rdi
+    pop rsi
+    pop rbp
+    pop rsp
+    pop rbx
+    pop rdx
+    pop rcx
+    pop rax
+    
+    ; Отправляем EOI если прерывание было от контроллера (IRQ)
+    ; mov al, 0x20
+    ; out 0x20, al
+    
+    iretq                   ; Возврат из прерывания
+

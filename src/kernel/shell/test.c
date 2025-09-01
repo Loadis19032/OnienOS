@@ -8,34 +8,30 @@
 void _s() {
     vga_init();
     
-    int x = 100, y = 100;
-    int dx = 3, dy = 2;
-    uint8_t color = VGA_RED;
-    int radius = 20;
     
-    while (!kbhit()) {
-        vga_clear_buffer(VGA_BLACK);
-        
-        vga_fill_circle(x, y, radius, color);
-        
-        for (int i = 1; i <= 5; i++) {
-            vga_draw_circle(x - dx*i/2, y - dy*i/2, radius - i*2, color - i);
-        }
-        
-        vga_draw_line(x, y, x + dx*10, y + dy*10, VGA_LGRAY);
+    int x = 1;
+    int y = 1;
 
-        x += dx;
-        y += dy;
-        
-        if (x <= radius || x >= 640 - radius) {
-            dx = -dx;
-            color = (color + 1) % 16;
+    int countx = 1;
+    int county = 1;
+
+    while (1) {
+        vga_clear_buffer(0);
+        vga_fill_rect(x, y, 50, 50, 0x4);
+
+        x += countx;
+        y += county;
+
+        if (x >= 640 || y >= 480) {
+            countx -= 1;
+            county += 1;
         }
-        if (y <= radius || y >= 480 - radius) {
-            dy = -dy;
-            color = (color + 5) % 16;
+
+        if (x == 0 || y == 0) {
+            countx += 1;
+            county -= 1;
         }
-        
+
         vga_swap_buffers();
     }
 }

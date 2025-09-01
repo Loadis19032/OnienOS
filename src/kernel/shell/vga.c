@@ -1,61 +1,41 @@
 #include "vga.h"
-#include <stdio.h>
+#include <stdint.h>
 
 #define SCREEN_WIDTH 640
 #define SCREEN_HEIGHT 480
-#define BUFFER_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT / 8)
+#define PLANE_SIZE (SCREEN_WIDTH * SCREEN_HEIGHT / 8)
 
-static uint8_t back_buffer[BUFFER_SIZE];
-static uint8_t front_buffer[BUFFER_SIZE];
-static uint8_t pixel_colors[SCREEN_WIDTH * SCREEN_HEIGHT];
-static int double_buffering = 1;
-
-static int dirty_regions[4][4];
-static int dirty_count = 0;
-
-static void fast_memcpy(uint8_t* dest, const uint8_t* src, int size) {
-    int i = 0;
-    for (; i + 7 < size; i += 8) {
-        asm volatile (
-            "movq (%1), %%mm0\n"
-            "movq %%mm0, (%0)\n"
-            : : "r"(dest + i), "r"(src + i) : "memory"
-        );
-    }
-    asm volatile ("emms" : : : "memory");
-    for (; i < size; i++) {
-        dest[i] = src[i];
-    }
-}
+static uint8_t plane0[PLANE_SIZE];
+static uint8_t plane1[PLANE_SIZE];
+static uint8_t plane2[PLANE_SIZE];
+static uint8_t plane3[PLANE_SIZE];
+static int dirty_x1 = SCREEN_WIDTH, dirty_y1 = SCREEN_HEIGHT;
+static int dirty_x2 = 0, dirty_y2 = 0;
+static int dirty = 0;
 
 static void add_dirty_region(int x, int y, int width, int height) {
-    if (dirty_count >= 4) {
-        dirty_count = 1;
-        dirty_regions[0][0] = 0;
-        dirty_regions[0][1] = 0;
-        dirty_regions[0][2] = SCREEN_WIDTH;
-        dirty_regions[0][3] = SCREEN_HEIGHT;
+    if (!dirty) {
+        dirty_x1 = x;
+        dirty_y1 = y;
+        dirty_x2 = x + width;
+        dirty_y2 = y + height;
+        dirty = 1;
         return;
     }
-    dirty_regions[dirty_count][0] = x;
-    dirty_regions[dirty_count][1] = y;
-    dirty_regions[dirty_count][2] = x + width;
-    dirty_regions[dirty_count][3] = y + height;
-    dirty_count++;
+    
+    if (x < dirty_x1) dirty_x1 = x;
+    if (y < dirty_y1) dirty_y1 = y;
+    if (x + width > dirty_x2) dirty_x2 = x + width;
+    if (y + height > dirty_y2) dirty_y2 = y + height;
 }
 
 void vga_init() {
     outb(0x3C2, 0xE3);
-    outb(0x3C4, 0x00);
-    outb(0x3C5, 0x03);
-    outb(0x3C4, 0x01);
-    outb(0x3C5, 0x01);
-    outb(0x3C4, 0x02);
-    outb(0x3C5, 0x0F);
-    outb(0x3C4, 0x03);
-    outb(0x3C5, 0x00);
-    outb(0x3C4, 0x04);
-    outb(0x3C5, 0x06);
+    outb(0x3C4, 0x00); outb(0x3C5, 0x03);
+    outb(0x3C4, 0x01); outb(0x3C5, 0x01);
+    outb(0x3C4, 0x02); outb(0x3C5, 0x0F);
+    outb(0x3C4, 0x03); outb(0x3C5, 0x00);
+    outb(0x3C4, 0x04); outb(0x3C5, 0x06);
 
     static const uint8_t crtc[] = {
         0x5F, 0x4F, 0x50, 0x82, 0x54, 0x80, 0x0B, 0x3E,
@@ -72,10 +52,6 @@ void vga_init() {
         outb(0x3D5, crtc[i]);
     }
 
-    outb(0x3D4, 0x0C); outb(0x3D5, 0x00);
-    outb(0x3D4, 0x0D); outb(0x3D5, 0x00);
-    outb(0x3D4, 0x0C); outb(0x3D5, 0x00);
-    outb(0x3D4, 0x0D); outb(0x3D5, 0x00);
     outb(0x3CE, 0x00); outb(0x3CF, 0x00);
     outb(0x3CE, 0x01); outb(0x3CF, 0x00);
     outb(0x3CE, 0x02); outb(0x3CF, 0x00);
@@ -100,90 +76,105 @@ void vga_init() {
     (void)inb(0x3DA);
     outb(0x3C0, 0x20);
     
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        back_buffer[i] = 0;
-        front_buffer[i] = 0;
+    for (int i = 0; i < PLANE_SIZE; i++) {
+        plane0[i] = 0;
+        plane1[i] = 0;
+        plane2[i] = 0;
+        plane3[i] = 0;
     }
-    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
-        pixel_colors[i] = 0;
+    dirty = 0;
+
+    uint8_t palette[16][3] = {
+        {0x00, 0x00, 0x00}, {0x00, 0x00, 0xAA}, {0x00, 0xAA, 0x00}, {0x00, 0xAA, 0xAA},
+        {0xAA, 0x00, 0x00}, {0xAA, 0x00, 0xAA}, {0xAA, 0x55, 0x00}, {0xAA, 0xAA, 0xAA},
+        {0x55, 0x55, 0x55}, {0x55, 0x55, 0xFF}, {0x55, 0xFF, 0x55}, {0x55, 0xFF, 0xFF},
+        {0xFF, 0x55, 0x55}, {0xFF, 0x55, 0xFF}, {0xFF, 0xFF, 0x55}, {0xFF, 0xFF, 0xFF}
+    };
+    for (int i = 0; i < 16; i++) {
+        vga_set_palette_color(i, palette[i][0], palette[i][1], palette[i][2]);
     }
-    dirty_count = 0;
 }
 
 void vga_clear_buffer(uint8_t color) {
-    uint8_t pattern = 0x00;
-    if (color & 0x01) pattern |= 0x55;
-    if (color & 0x02) pattern |= 0xAA;
-    if (color & 0x04) pattern |= 0x55;
-    if (color & 0x08) pattern |= 0xAA;
+    uint8_t pattern0 = (color & 1) ? 0xFF : 0x00;
+    uint8_t pattern1 = (color & 2) ? 0xFF : 0x00;
+    uint8_t pattern2 = (color & 4) ? 0xFF : 0x00;
+    uint8_t pattern3 = (color & 8) ? 0xFF : 0x00;
+
+    for (int i = 0; i < PLANE_SIZE; i++) {
+        plane0[i] = pattern0;
+        plane1[i] = pattern1;
+        plane2[i] = pattern2;
+        plane3[i] = pattern3;
+    }
     
-    for (int i = 0; i < BUFFER_SIZE; i++) {
-        back_buffer[i] = pattern;
-    }
-    for (int i = 0; i < SCREEN_WIDTH * SCREEN_HEIGHT; i++) {
-        pixel_colors[i] = color;
-    }
-    dirty_count = 1;
-    dirty_regions[0][0] = 0;
-    dirty_regions[0][1] = 0;
-    dirty_regions[0][2] = SCREEN_WIDTH;
-    dirty_regions[0][3] = SCREEN_HEIGHT;
+    dirty_x1 = 0;
+    dirty_y1 = 0;
+    dirty_x2 = SCREEN_WIDTH;
+    dirty_y2 = SCREEN_HEIGHT;
+    dirty = 1;
 }
 
 void vga_draw_pixel(int x, int y, uint8_t color) {
     if (x < 0 || x >= SCREEN_WIDTH || y < 0 || y >= SCREEN_HEIGHT) return;
     
-    pixel_colors[y * SCREEN_WIDTH + x] = color;
-    int byte_offset = y * 80 + (x / 8);
+    int byte_offset = y * (SCREEN_WIDTH / 8) + (x / 8);
     int bit_mask = 0x80 >> (x % 8);
-    back_buffer[byte_offset] |= bit_mask;
+
+    if (color & 1) plane0[byte_offset] |= bit_mask;
+    else plane0[byte_offset] &= ~bit_mask;
+
+    if (color & 2) plane1[byte_offset] |= bit_mask;
+    else plane1[byte_offset] &= ~bit_mask;
+
+    if (color & 4) plane2[byte_offset] |= bit_mask;
+    else plane2[byte_offset] &= ~bit_mask;
+
+    if (color & 8) plane3[byte_offset] |= bit_mask;
+    else plane3[byte_offset] &= ~bit_mask;
+
     add_dirty_region(x, y, 1, 1);
 }
 
 void vga_swap_buffers() {
-    if (dirty_count == 0) return;
+    if (!dirty) return;
     
-    if (dirty_count >= 3) {
+    dirty_x1 = dirty_x1 < 0 ? 0 : dirty_x1;
+    dirty_y1 = dirty_y1 < 0 ? 0 : dirty_y1;
+    dirty_x2 = dirty_x2 > SCREEN_WIDTH ? SCREEN_WIDTH : dirty_x2;
+    dirty_y2 = dirty_y2 > SCREEN_HEIGHT ? SCREEN_HEIGHT : dirty_y2;
+    
+    if (dirty_x1 >= dirty_x2 || dirty_y1 >= dirty_y2) {
+        dirty = 0;
+        return;
+    }
+    
+    uint8_t* vga_mem = (uint8_t*)0xA0000;
+    int start_byte_x = dirty_x1 / 8;
+    int end_byte_x = (dirty_x2 + 7) / 8;
+    int bytes_per_line = end_byte_x - start_byte_x;
+    
+    for (int plane = 0; plane < 4; plane++) {
         outb(0x3C4, 0x02);
-        outb(0x3C5, 0x0F);
-        uint8_t* vga = (uint8_t*)0xA0000;
-        fast_memcpy(vga, back_buffer, BUFFER_SIZE);
-    } else {
-        for (int i = 0; i < dirty_count; i++) {
-            int x1 = dirty_regions[i][0];
-            int y1 = dirty_regions[i][1];
-            int x2 = dirty_regions[i][2];
-            int y2 = dirty_regions[i][3];
-            
-            for (int plane = 0; plane < 4; plane++) {
-                outb(0x3C4, 0x02);
-                outb(0x3C5, 1 << plane);
-                uint8_t* vga = (uint8_t*)0xA0000;
-                
-                for (int y = y1; y < y2; y++) {
-                    for (int x = x1; x < x2; x += 8) {
-                        int byte_offset = y * 80 + (x / 8);
-                        uint8_t byte_value = 0;
-                        for (int i = 0; i < 8; i++) {
-                            int px = x + i;
-                            if (px < x2 && px < SCREEN_WIDTH) {
-                                uint8_t color = pixel_colors[y * SCREEN_WIDTH + px];
-                                if (color & (1 << plane)) {
-                                    byte_value |= (0x80 >> i);
-                                }
-                            }
-                        }
-                        vga[byte_offset] = byte_value;
-                    }
-                }
+        outb(0x3C5, 1 << plane);
+        
+        uint8_t* plane_data;
+        switch (plane) {
+            case 0: plane_data = plane0; break;
+            case 1: plane_data = plane1; break;
+            case 2: plane_data = plane2; break;
+            case 3: plane_data = plane3; break;
+        }
+        
+        for (int y = dirty_y1; y < dirty_y2; y++) {
+            int line_offset = y * (SCREEN_WIDTH / 8) + start_byte_x;
+            for (int x = 0; x < bytes_per_line; x++) {
+                vga_mem[line_offset + x] = plane_data[line_offset + x];
             }
         }
     }
-    dirty_count = 0;
-}
-
-uint8_t* vga_get_back_buffer() {
-    return back_buffer;
+    
+    dirty = 0;
 }
 
 void vga_draw_line(int x1, int y1, int x2, int y2, uint8_t color) {
@@ -192,14 +183,9 @@ void vga_draw_line(int x1, int y1, int x2, int y2, uint8_t color) {
     int sx = (x1 < x2) ? 1 : -1;
     int sy = (y1 < y2) ? 1 : -1;
     int err = dx - dy;
-    int min_x = x1, max_x = x1, min_y = y1, max_y = y1;
     
     while (1) {
         vga_draw_pixel(x1, y1, color);
-        if (x1 < min_x) min_x = x1;
-        if (x1 > max_x) max_x = x1;
-        if (y1 < min_y) min_y = y1;
-        if (y1 > max_y) max_y = y1;
         if (x1 == x2 && y1 == y2) break;
         int e2 = 2 * err;
         if (e2 > -dy) {
@@ -211,7 +197,6 @@ void vga_draw_line(int x1, int y1, int x2, int y2, uint8_t color) {
             y1 += sy;
         }
     }
-    add_dirty_region(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
 }
 
 void vga_draw_rect(int x, int y, int width, int height, uint8_t color) {
@@ -227,7 +212,6 @@ void vga_fill_rect(int x, int y, int width, int height, uint8_t color) {
             vga_draw_pixel(j, i, color);
         }
     }
-    add_dirty_region(x, y, width, height);
 }
 
 void vga_fill_triangle(int x1, int y1, int x2, int y2, int x3, int y3, uint8_t color) {
@@ -241,12 +225,9 @@ void vga_fill_triangle(int x1, int y1, int x2, int y2, int x3, int y3, uint8_t c
     
     float xa = x1;
     float xb = x1;
-    int min_x = x1, max_x = x1, min_y = y1, max_y = y3;
     
     for (int y = y1; y < y2; y++) {
         vga_draw_line((int)xa, y, (int)xb, y, color);
-        if ((int)xa < min_x) min_x = (int)xa;
-        if ((int)xb > max_x) max_x = (int)xb;
         xa += dx13;
         xb += dx12;
     }
@@ -254,12 +235,9 @@ void vga_fill_triangle(int x1, int y1, int x2, int y2, int x3, int y3, uint8_t c
     xb = x2;
     for (int y = y2; y <= y3; y++) {
         vga_draw_line((int)xa, y, (int)xb, y, color);
-        if ((int)xa < min_x) min_x = (int)xa;
-        if ((int)xb > max_x) max_x = (int)xb;
         xa += dx13;
         xb += dx23;
     }
-    add_dirty_region(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
 }
 
 void vga_draw_triangle(int x1, int y1, int x2, int y2, int x3, int y3, uint8_t color) {
@@ -272,8 +250,6 @@ void vga_draw_circle(int center_x, int center_y, int radius, uint8_t color) {
     int x = 0;
     int y = radius;
     int d = 3 - 2 * radius;
-    int min_x = center_x - radius, max_x = center_x + radius;
-    int min_y = center_y - radius, max_y = center_y + radius;
     
     while (y >= x) {
         vga_draw_pixel(center_x + x, center_y + y, color);
@@ -293,15 +269,12 @@ void vga_draw_circle(int center_x, int center_y, int radius, uint8_t color) {
             d = d + 4 * x + 6;
         }
     }
-    add_dirty_region(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
 }
 
 void vga_fill_circle(int center_x, int center_y, int radius, uint8_t color) {
     int x = 0;
     int y = radius;
     int d = 3 - 2 * radius;
-    int min_x = center_x - radius, max_x = center_x + radius;
-    int min_y = center_y - radius, max_y = center_y + radius;
     
     while (y >= x) {
         vga_draw_line(center_x - x, center_y + y, center_x + x, center_y + y, color);
@@ -317,7 +290,6 @@ void vga_fill_circle(int center_x, int center_y, int radius, uint8_t color) {
             d = d + 4 * x + 6;
         }
     }
-    add_dirty_region(min_x, min_y, max_x - min_x + 1, max_y - min_y + 1);
 }
 
 void vga_draw_rounded_rect(int x, int y, int width, int height, int radius, uint8_t color) {
@@ -398,4 +370,50 @@ void vga_set_palette_color(uint8_t index, uint8_t r, uint8_t g, uint8_t b) {
     outb(0x3C9, r >> 2);
     outb(0x3C9, g >> 2);
     outb(0x3C9, b >> 2);
+}
+
+/**
+ * Рисует изображение из массива данных на экране
+ * @param data - массив с данными пикселей (формат: width * height байт)
+ * @param x - координата X левого верхнего угла
+ * @param y - координата Y левого верхнего угла
+ * @param width - ширина изображения
+ * @param height - высота изображения
+ * @param transparent_color - цвет, который считается прозрачным (не рисуется)
+ */
+void vga_draw_from_array(const uint8_t* data, int x, int y, int width, int height, uint8_t transparent_color) {
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            uint8_t color = data[j * width + i];
+            if (color != transparent_color) {
+                vga_draw_pixel(x + i, y + j, color);
+            }
+        }
+    }
+}
+
+/**
+ * Рисует изображение из массива данных с возможностью отражения
+ * @param data - массив с данными пикселей
+ * @param x - координата X левого верхнего угла
+ * @param y - координата Y левого верхнего угла
+ * @param width - ширина изображения
+ * @param height - высота изображения
+ * @param transparent_color - прозрачный цвет
+ * @param flip_horizontal - отразить по горизонтали (1 - да, 0 - нет)
+ * @param flip_vertical - отразить по вертикали (1 - да, 0 - нет)
+ */
+void vga_draw_from_array_flipped(const uint8_t* data, int x, int y, int width, int height, 
+                                uint8_t transparent_color, int flip_horizontal, int flip_vertical) {
+    for (int j = 0; j < height; j++) {
+        for (int i = 0; i < width; i++) {
+            int src_x = flip_horizontal ? (width - 1 - i) : i;
+            int src_y = flip_vertical ? (height - 1 - j) : j;
+            
+            uint8_t color = data[src_y * width + src_x];
+            if (color != transparent_color) {
+                vga_draw_pixel(x + i, y + j, color);
+            }
+        }
+    }
 }
